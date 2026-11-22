@@ -1,0 +1,72 @@
+{
+  "nextOrderSeq": 104,
+  "orders": [
+    {
+      "id": "ord-102",
+      "orderNumber": "JK-102",
+      "tableNumber": 2,
+      "guestName": "Amina W.",
+      "items": [
+        {
+          "menuItemId": "wali-nazi-samaki",
+          "name": "Wali wa Nazi & Samaki",
+          "quantity": 1,
+          "unitPrice": 980,
+          "selectedOptionLabel": "Tamarind-Coconut Glaze",
+          "spiceLevel": "Medium"
+        },
+        {
+          "menuItemId": "mahamri-mbaazi",
+          "name": "Mahamri & Mbaazi",
+          "quantity": 1,
+          "unitPrice": 380,
+          "selectedOptionLabel": "3 Mahamri + Mbaazi Bowl"
+        }
+      ],
+      "subtotal": 1360,
+      "serviceNote": "Please bring extra lime wedges.",
+      "status": "Preparing",
+      "createdAt": "2026-11-21T02:29:34.841Z",
+      "updatedAt": "2026-11-21T02:34:34.841Z",
+      "estimatedMinutes": 22
+    },
+    {
+      "id": "ord-103",
+      "orderNumber": "JK-103",
+      "tableNumber": 6,
+      "guestName": "David K.",
+      "items": [
+        {
+          "menuItemId": "ugali-nyama-choma",
+          "name": "Ugali & Nyama Choma",
+          "quantity": 2,
+          "unitPrice": 1150,
+          "selectedOptionLabel": "Charcoal-Roasted Goat (Mbuzi)",
+          "spiceLevel": "Pilipili Hot"
+        },
+        {
+          "menuItemId": "samosa",
+          "name": "Samosa",
+          "quantity": 1,
+          "unitPrice": 220,
+          "selectedOptionLabel": "Spiced Minced Beef (2 pcs)",
+          "spiceLevel": "Medium"
+        }
+      ],
+      "subtotal": 2520,
+      "status": "Received",
+      "createdAt": "2026-11-21T02:35:34.841Z",
+      "updatedAt": "2026-11-21T02:35:34.841Z",
+      "estimatedMinutes": 25
+    }
+  ],
+  "serviceRequests": [
+    {
+      "id": "srv-1",
+      "tableNumber": 2,
+      "type": "Extra Napkins & Water",
+      "status": "Open",
+      "createdAt": "2026-11-21T02:36:34.841Z"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Jikoni Table — Kenyan & Swahili QR Digital Menu",
+  "description": "Scan a table QR code to browse authentic Kenyan & Swahili dishes across Breakfast, Lunch, Snacks, and Supper, customize your plate, and send orders straight to the kitchen.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
