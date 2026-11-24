@@ -127,78 +127,10 @@ function requireAdmin(req: express.Request, res: express.Response): boolean {
 }
 
 function createInitialSeed(): StoreState {
-  const now = Date.now();
   return {
-    nextOrderSeq: 104,
-    orders: [
-      {
-        id: 'ord-102',
-        orderNumber: 'JK-102',
-        tableNumber: 2,
-        guestName: 'Amina W.',
-        items: [
-          {
-            menuItemId: 'wali-nazi-samaki',
-            name: 'Wali wa Nazi & Samaki',
-            quantity: 1,
-            unitPrice: 980,
-            selectedOptionLabel: 'Tamarind-Coconut Glaze',
-            spiceLevel: 'Medium',
-          },
-          {
-            menuItemId: 'mahamri-mbaazi',
-            name: 'Mahamri & Mbaazi',
-            quantity: 1,
-            unitPrice: 380,
-            selectedOptionLabel: '3 Mahamri + Mbaazi Bowl',
-          },
-        ],
-        subtotal: 1360,
-        serviceNote: 'Please bring extra lime wedges.',
-        status: 'Preparing',
-        createdAt: new Date(now - 9 * 60 * 1000).toISOString(),
-        updatedAt: new Date(now - 4 * 60 * 1000).toISOString(),
-        estimatedMinutes: 22,
-      },
-      {
-        id: 'ord-103',
-        orderNumber: 'JK-103',
-        tableNumber: 6,
-        guestName: 'David K.',
-        items: [
-          {
-            menuItemId: 'ugali-nyama-choma',
-            name: 'Ugali & Nyama Choma',
-            quantity: 2,
-            unitPrice: 1150,
-            selectedOptionLabel: 'Charcoal-Roasted Goat (Mbuzi)',
-            spiceLevel: 'Pilipili Hot',
-          },
-          {
-            menuItemId: 'samosa',
-            name: 'Samosa',
-            quantity: 1,
-            unitPrice: 220,
-            selectedOptionLabel: 'Spiced Minced Beef (2 pcs)',
-            spiceLevel: 'Medium',
-          },
-        ],
-        subtotal: 2520,
-        status: 'Received',
-        createdAt: new Date(now - 3 * 60 * 1000).toISOString(),
-        updatedAt: new Date(now - 3 * 60 * 1000).toISOString(),
-        estimatedMinutes: 25,
-      },
-    ],
-    serviceRequests: [
-      {
-        id: 'srv-1',
-        tableNumber: 2,
-        type: 'Extra Napkins & Water',
-        status: 'Open',
-        createdAt: new Date(now - 2 * 60 * 1000).toISOString(),
-      },
-    ],
+    nextOrderSeq: 101,
+    orders: [],
+    serviceRequests: [],
   };
 }
 
@@ -239,6 +171,72 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json({ limit: '1mb' }));
+
+  app.use('/api', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+  });
+
+  // Real-time Server-Sent Events clients
+  type SseClient = {
+    res: express.Response;
+    isAdmin: boolean;
+    tableNumber?: number;
+  };
+  const sseClients = new Set<SseClient>();
+
+  function broadcastUpdate(tableNumber?: number) {
+    const payload = `data: ${JSON.stringify({ type: 'sync', tableNumber, ts: Date.now() })}\n\n`;
+    for (const client of sseClients) {
+      if (client.isAdmin || (tableNumber !== undefined && client.tableNumber === tableNumber)) {
+        try {
+          client.res.write(payload);
+        } catch {
+          sseClients.delete(client);
+        }
+      }
+    }
+  }
+
+  app.get('/api/events', (req, res) => {
+    const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+    const isAdmin = verifyAdminToken(token);
+    const tableNum = req.query.table ? Number(req.query.table) : undefined;
+
+    if (!isAdmin && (!tableNum || !Number.isInteger(tableNum) || tableNum < 1 || tableNum > 99)) {
+      res.status(401).json({ error: 'Valid table or staff authentication required.' });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    const client: SseClient = {
+      res,
+      isAdmin,
+      tableNumber: isAdmin ? undefined : tableNum,
+    };
+    sseClients.add(client);
+    res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+
+    const keepAlive = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+      } catch {
+        clearInterval(keepAlive);
+        sseClients.delete(client);
+      }
+    }, 20000);
+
+    req.on('close', () => {
+      clearInterval(keepAlive);
+      sseClients.delete(client);
+    });
+  });
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, service: 'jikoni-table' });
@@ -368,6 +366,7 @@ async function startServer() {
 
     state.orders.unshift(newOrder);
     writeStore(state);
+    broadcastUpdate(tableNumber);
 
     res.status(201).json({ order: newOrder });
   });
@@ -396,6 +395,7 @@ async function startServer() {
       updatedAt: new Date().toISOString(),
     };
     writeStore(state);
+    broadcastUpdate(state.orders[idx].tableNumber);
     res.json({ order: state.orders[idx] });
   });
 
@@ -432,6 +432,7 @@ async function startServer() {
     };
     state.serviceRequests.unshift(created);
     writeStore(state);
+    broadcastUpdate(tableNum);
     res.status(201).json({ request: created });
   });
 
@@ -450,6 +451,7 @@ async function startServer() {
       status: 'Resolved',
     };
     writeStore(state);
+    broadcastUpdate(state.serviceRequests[idx].tableNumber);
     res.json({ request: state.serviceRequests[idx] });
   });
 

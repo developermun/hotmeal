@@ -69,8 +69,8 @@ function loadCartForTable(tableNumber: number): CartItem[] {
 }
 
 const ADMIN_TOKEN_STORAGE_KEY = 'jikoni_admin_token';
-const FALLBACK_ORDERS_KEY = 'jikoni_static_orders_v1';
-const FALLBACK_REQUESTS_KEY = 'jikoni_static_requests_v1';
+const FALLBACK_ORDERS_KEY = 'jikoni_static_orders_v2';
+const FALLBACK_REQUESTS_KEY = 'jikoni_static_requests_v2';
 const STATIC_FALLBACK_PIN = '2540';
 
 function getStaticFallbackOrders(): TableOrder[] {
@@ -83,73 +83,7 @@ function getStaticFallbackOrders(): TableOrder[] {
   } catch {
     // Ignore storage read errors
   }
-  const now = Date.now();
-  const seed: TableOrder[] = [
-    {
-      id: 'ord-102',
-      orderNumber: 'JK-102',
-      tableNumber: 2,
-      guestName: 'Amina W.',
-      items: [
-        {
-          menuItemId: 'wali-nazi-samaki',
-          name: 'Wali wa Nazi & Samaki',
-          quantity: 1,
-          unitPrice: 980,
-          selectedOptionLabel: 'Tamarind-Coconut Glaze',
-          spiceLevel: 'Medium',
-        },
-        {
-          menuItemId: 'mahamri-mbaazi',
-          name: 'Mahamri & Mbaazi',
-          quantity: 1,
-          unitPrice: 380,
-          selectedOptionLabel: '3 Mahamri + Mbaazi Bowl',
-        },
-      ],
-      subtotal: 1360,
-      serviceNote: 'Please bring extra lime wedges.',
-      status: 'Preparing',
-      createdAt: new Date(now - 9 * 60 * 1000).toISOString(),
-      updatedAt: new Date(now - 4 * 60 * 1000).toISOString(),
-      estimatedMinutes: 22,
-    },
-    {
-      id: 'ord-103',
-      orderNumber: 'JK-103',
-      tableNumber: 6,
-      guestName: 'David K.',
-      items: [
-        {
-          menuItemId: 'ugali-nyama-choma',
-          name: 'Ugali & Nyama Choma',
-          quantity: 2,
-          unitPrice: 1150,
-          selectedOptionLabel: 'Charcoal-Roasted Goat (Mbuzi)',
-          spiceLevel: 'Pilipili Hot',
-        },
-        {
-          menuItemId: 'samosa',
-          name: 'Samosa',
-          quantity: 1,
-          unitPrice: 220,
-          selectedOptionLabel: 'Spiced Minced Beef (2 pcs)',
-          spiceLevel: 'Medium',
-        },
-      ],
-      subtotal: 2520,
-      status: 'Received',
-      createdAt: new Date(now - 3 * 60 * 1000).toISOString(),
-      updatedAt: new Date(now - 3 * 60 * 1000).toISOString(),
-      estimatedMinutes: 25,
-    },
-  ];
-  try {
-    localStorage.setItem(FALLBACK_ORDERS_KEY, JSON.stringify(seed));
-  } catch {
-    // Ignore storage write errors
-  }
-  return seed;
+  return [];
 }
 
 function getStaticFallbackRequests(): ServiceRequest[] {
@@ -197,7 +131,6 @@ export default function App() {
   const [serviceRequests, setServiceRequests] = useState<ServiceRequest[]>([]);
   const [loadingOrders, setLoadingOrders] = useState<boolean>(true);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [usingStaticFallback, setUsingStaticFallback] = useState<boolean>(false);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -211,17 +144,14 @@ export default function App() {
     async (silent = false) => {
       if (!silent) setLoadingOrders(true);
       try {
-        const res = await fetch(`/api/orders?table=${tableNumber}`);
+        const res = await fetch(`/api/orders?table=${tableNumber}`, { cache: 'no-store' });
         const json = await parseJsonIfAvailable<{ orders: TableOrder[] }>(res);
         if (json) {
-          setUsingStaticFallback(false);
           setTableOrders(json.orders || []);
         } else {
-          setUsingStaticFallback(true);
           setTableOrders(getStaticFallbackOrders().filter((o) => o.tableNumber === tableNumber));
         }
       } catch {
-        setUsingStaticFallback(true);
         setTableOrders(getStaticFallbackOrders().filter((o) => o.tableNumber === tableNumber));
       } finally {
         if (!silent) setLoadingOrders(false);
@@ -238,8 +168,8 @@ export default function App() {
       try {
         const headers = { 'x-admin-token': adminToken };
         const [ordersRes, reqRes] = await Promise.all([
-          fetch('/api/orders', { headers }),
-          fetch('/api/service-requests', { headers }),
+          fetch('/api/orders', { headers, cache: 'no-store' }),
+          fetch('/api/service-requests', { headers, cache: 'no-store' }),
         ]);
 
         if (ordersRes.status === 401 || reqRes.status === 401) {
@@ -256,16 +186,13 @@ export default function App() {
         const reqJson = await parseJsonIfAvailable<{ requests: ServiceRequest[] }>(reqRes);
 
         if (ordersJson && reqJson) {
-          setUsingStaticFallback(false);
           setAdminOrders(ordersJson.orders || []);
           setServiceRequests(reqJson.requests || []);
         } else {
-          setUsingStaticFallback(true);
           setAdminOrders(getStaticFallbackOrders());
           setServiceRequests(getStaticFallbackRequests());
         }
       } catch {
-        setUsingStaticFallback(true);
         setAdminOrders(getStaticFallbackOrders());
         setServiceRequests(getStaticFallbackRequests());
       } finally {
@@ -278,17 +205,95 @@ export default function App() {
   useEffect(() => {
     if (route.zone === 'customer') {
       fetchCustomerTableOrders(false);
-      const interval = window.setInterval(() => fetchCustomerTableOrders(true), 5000);
-      return () => window.clearInterval(interval);
+      const interval = window.setInterval(() => fetchCustomerTableOrders(true), 2500);
+
+      let eventSource: EventSource | null = null;
+      if (typeof EventSource !== 'undefined') {
+        eventSource = new EventSource(`/api/events?table=${tableNumber}`);
+        eventSource.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data) as { type?: string };
+            if (data.type === 'sync') {
+              fetchCustomerTableOrders(true);
+            }
+          } catch {
+            // Ignore malformed SSE payload
+          }
+        };
+      }
+
+      const handleSyncEvent = () => fetchCustomerTableOrders(true);
+      const handleVisibility = () => {
+        if (document.visibilityState === 'visible') {
+          fetchCustomerTableOrders(true);
+        }
+      };
+      const handleStorage = (e: StorageEvent) => {
+        if (e.key === FALLBACK_ORDERS_KEY) {
+          fetchCustomerTableOrders(true);
+        }
+      };
+
+      window.addEventListener('focus', handleSyncEvent);
+      window.addEventListener('storage', handleStorage);
+      document.addEventListener('visibilitychange', handleVisibility);
+
+      return () => {
+        window.clearInterval(interval);
+        eventSource?.close();
+        window.removeEventListener('focus', handleSyncEvent);
+        window.removeEventListener('storage', handleStorage);
+        document.removeEventListener('visibilitychange', handleVisibility);
+      };
     }
+
     if (adminToken) {
       fetchAdminState(false);
-      const interval = window.setInterval(() => fetchAdminState(true), 5000);
-      return () => window.clearInterval(interval);
+      const interval = window.setInterval(() => fetchAdminState(true), 2500);
+
+      let eventSource: EventSource | null = null;
+      if (typeof EventSource !== 'undefined' && !adminToken.startsWith('static-staff-')) {
+        eventSource = new EventSource(`/api/events?token=${encodeURIComponent(adminToken)}`);
+        eventSource.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data) as { type?: string };
+            if (data.type === 'sync') {
+              fetchAdminState(true);
+            }
+          } catch {
+            // Ignore malformed SSE payload
+          }
+        };
+      }
+
+      const handleSyncEvent = () => fetchAdminState(true);
+      const handleVisibility = () => {
+        if (document.visibilityState === 'visible') {
+          fetchAdminState(true);
+        }
+      };
+      const handleStorage = (e: StorageEvent) => {
+        if (e.key === FALLBACK_ORDERS_KEY || e.key === FALLBACK_REQUESTS_KEY) {
+          fetchAdminState(true);
+        }
+      };
+
+      window.addEventListener('focus', handleSyncEvent);
+      window.addEventListener('storage', handleStorage);
+      document.addEventListener('visibilitychange', handleVisibility);
+
+      return () => {
+        window.clearInterval(interval);
+        eventSource?.close();
+        window.removeEventListener('focus', handleSyncEvent);
+        window.removeEventListener('storage', handleStorage);
+        document.removeEventListener('visibilitychange', handleVisibility);
+      };
     }
+
     setLoadingOrders(false);
     return undefined;
-  }, [route.zone, adminToken, fetchCustomerTableOrders, fetchAdminState]);
+  }, [route.zone, tableNumber, adminToken, fetchCustomerTableOrders, fetchAdminState]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -396,7 +401,6 @@ export default function App() {
       throw new Error('Incorrect staff passcode.');
     }
     const localToken = `static-staff-${Date.now()}`;
-    setUsingStaticFallback(true);
     setAdminToken(localToken);
     try {
       sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, localToken);
@@ -408,7 +412,7 @@ export default function App() {
   const handleChangeAdminPassword = async (newPassword: string) => {
     if (!adminToken) return;
 
-    if (!usingStaticFallback) {
+    if (!adminToken.startsWith('static-staff-')) {
       try {
         const res = await fetch('/api/admin/password', {
           method: 'POST',
@@ -417,6 +421,7 @@ export default function App() {
             'x-admin-token': adminToken,
           },
           body: JSON.stringify({ newPassword }),
+          cache: 'no-store',
         });
         const ct = res.headers.get('content-type') || '';
         if (res.ok && ct.includes('application/json')) {
@@ -582,37 +587,39 @@ export default function App() {
 
     let createdOrder: TableOrder | null = null;
 
-    if (!usingStaticFallback) {
-      try {
-        const res = await fetch('/api/orders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tableNumber,
-            guestName: guestName || undefined,
-            serviceNote: serviceNote || undefined,
-            estimatedMinutes: estPrep,
-            items: orderItems,
-          }),
-        });
-        const data = await parseJsonIfAvailable<{ order: TableOrder; error?: string }>(res);
-        if (data?.order) {
-          createdOrder = data.order;
-        } else if (res.status >= 400 && res.status < 500 && res.status !== 404) {
-          const errData = (await res.json().catch(() => ({}))) as { error?: string };
-          throw new Error(errData.error || 'Could not submit order to kitchen.');
-        }
-      } catch (err) {
-        if (err instanceof Error && err.message !== 'Failed to fetch') {
-          throw err;
-        }
+    try {
+      const res = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tableNumber,
+          guestName: guestName || undefined,
+          serviceNote: serviceNote || undefined,
+          estimatedMinutes: estPrep,
+          items: orderItems,
+        }),
+        cache: 'no-store',
+      });
+      const data = await parseJsonIfAvailable<{ order: TableOrder; error?: string }>(res);
+      if (data?.order) {
+        createdOrder = data.order;
+      } else if (res.status >= 400 && res.status < 500 && res.status !== 404 && res.status !== 405) {
+        const ct = res.headers.get('content-type') || '';
+        const errData = ct.includes('application/json')
+          ? ((await res.json().catch(() => ({}))) as { error?: string })
+          : {};
+        throw new Error(errData.error || 'Could not submit order to kitchen.');
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message !== 'Failed to fetch') {
+        throw err;
       }
     }
 
     if (!createdOrder) {
       const existingAll = getStaticFallbackOrders();
       const subtotal = orderItems.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0);
-      const seq = 104 + existingAll.length;
+      const seq = 101 + existingAll.length;
       const nowIso = new Date().toISOString();
       createdOrder = {
         id: `ord-${seq}-${Date.now().toString(36)}`,
@@ -634,28 +641,28 @@ export default function App() {
       }
     }
 
-    setTableOrders((prev) => [createdOrder as TableOrder, ...prev]);
+    const finalOrder = createdOrder;
+    setTableOrders((prev) => [finalOrder, ...prev.filter((o) => o.id !== finalOrder.id)]);
     setCart([]);
     setDrawerOpen(false);
     navigateCustomerView('tracker', tableNumber);
-    showToast(`Order ${createdOrder.orderNumber} sent to kitchen for Table ${tableNumber}`);
+    showToast(`Order ${finalOrder.orderNumber} sent to kitchen for Table ${tableNumber}`);
   };
 
   const handleRequestService = async (type: ServiceRequestType) => {
     let created: ServiceRequest | null = null;
 
-    if (!usingStaticFallback) {
-      try {
-        const res = await fetch('/api/service-requests', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tableNumber, type }),
-        });
-        const data = await parseJsonIfAvailable<{ request: ServiceRequest }>(res);
-        if (data?.request) created = data.request;
-      } catch {
-        // Fall through to local fallback
-      }
+    try {
+      const res = await fetch('/api/service-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tableNumber, type }),
+        cache: 'no-store',
+      });
+      const data = await parseJsonIfAvailable<{ request: ServiceRequest }>(res);
+      if (data?.request) created = data.request;
+    } catch {
+      // Fall through to local fallback
     }
 
     if (!created) {
@@ -679,7 +686,7 @@ export default function App() {
     if (!adminToken) return;
     let updatedOrder: TableOrder | null = null;
 
-    if (!usingStaticFallback) {
+    if (!adminToken.startsWith('static-staff-')) {
       try {
         const res = await fetch(`/api/orders/${orderId}/status`, {
           method: 'PATCH',
@@ -688,6 +695,7 @@ export default function App() {
             'x-admin-token': adminToken,
           },
           body: JSON.stringify({ status: nextStatus }),
+          cache: 'no-store',
         });
         const data = await parseJsonIfAvailable<{ order: TableOrder }>(res);
         if (data?.order) updatedOrder = data.order;
@@ -717,11 +725,12 @@ export default function App() {
     if (!adminToken) return;
     let updatedReq: ServiceRequest | null = null;
 
-    if (!usingStaticFallback) {
+    if (!adminToken.startsWith('static-staff-')) {
       try {
         const res = await fetch(`/api/service-requests/${requestId}`, {
           method: 'PATCH',
           headers: { 'x-admin-token': adminToken },
+          cache: 'no-store',
         });
         const data = await parseJsonIfAvailable<{ request: ServiceRequest }>(res);
         if (data?.request) updatedReq = data.request;
