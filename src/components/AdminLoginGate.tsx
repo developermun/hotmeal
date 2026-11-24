@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowLeft, Lock } from 'lucide-react';
+import { ArrowLeft, Eye, EyeOff, Lock } from 'lucide-react';
 
 interface AdminLoginGateProps {
   onVerifyPin: (pin: string) => Promise<void>;
@@ -8,6 +8,7 @@ interface AdminLoginGateProps {
 
 export function AdminLoginGate({ onVerifyPin, onReturnToMenu }: AdminLoginGateProps) {
   const [pin, setPin] = useState('');
+  const [showPin, setShowPin] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -48,17 +49,26 @@ export function AdminLoginGate({ onVerifyPin, onReturnToMenu }: AdminLoginGatePr
             <label htmlFor="staff-pin-input" className="block text-xs font-medium text-[#E6DAC8]">
               Staff Passcode
             </label>
-            <input
-              id="staff-pin-input"
-              type="password"
-              inputMode="numeric"
-              autoComplete="current-password"
-              value={pin}
-              onChange={(e) => setPin(e.target.value)}
-              placeholder="Enter passcode"
-              className="w-full min-h-[46px] px-4 py-2.5 rounded-xl bg-[#120E0B] border border-[#2D241C] font-mono text-base tracking-widest text-[#F6EFE4] placeholder-[#7B6B58] placeholder:tracking-normal placeholder:font-sans focus:outline-none focus:border-[#C99A4E]"
-              autoFocus
-            />
+            <div className="relative">
+              <input
+                id="staff-pin-input"
+                type={showPin ? 'text' : 'password'}
+                autoComplete="current-password"
+                value={pin}
+                onChange={(e) => setPin(e.target.value)}
+                placeholder="Enter staff passcode"
+                className="w-full min-h-[46px] pl-4 pr-12 py-2.5 rounded-xl bg-[#120E0B] border border-[#2D241C] font-mono text-base tracking-widest text-[#F6EFE4] placeholder-[#7B6B58] placeholder:tracking-normal placeholder:font-sans focus:outline-none focus:border-[#C99A4E]"
+                autoFocus
+              />
+              <button
+                type="button"
+                onClick={() => setShowPin((prev) => !prev)}
+                aria-label={showPin ? 'Hide passcode' : 'Show passcode'}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-[#9E8B73] hover:text-[#F6EFE4]"
+              >
+                {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
 
           {errorMsg && (

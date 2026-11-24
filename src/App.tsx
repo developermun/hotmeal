@@ -358,18 +358,24 @@ export default function App() {
       });
 
       const ct = res.headers.get('content-type') || '';
-      if (ct.includes('application/json')) {
-        const data = (await res.json()) as { ok?: boolean; token?: string; error?: string };
-        if (!res.ok || !data.token) {
-          throw new Error(data.error || 'Incorrect staff passcode.');
+      if (res.status === 401) {
+        const data = ct.includes('application/json')
+          ? ((await res.json()) as { error?: string })
+          : {};
+        throw new Error(data.error || 'Incorrect staff passcode.');
+      }
+
+      if (res.ok && ct.includes('application/json')) {
+        const data = (await res.json()) as { ok?: boolean; token?: string };
+        if (data.token) {
+          setAdminToken(data.token);
+          try {
+            sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, data.token);
+          } catch {
+            // Ignore storage errors
+          }
+          return;
         }
-        setAdminToken(data.token);
-        try {
-          sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, data.token);
-        } catch {
-          // Ignore storage errors
-        }
-        return;
       }
     } catch (err) {
       if (err instanceof Error && err.message.includes('passcode')) {
@@ -377,8 +383,16 @@ export default function App() {
       }
     }
 
-    // Static hosting fallback when Express /api/admin/verify is unavailable (404)
-    if (pin !== STATIC_FALLBACK_PIN) {
+    // Static hosting fallback when Express /api/admin/verify is unavailable (404/405)
+    let expectedStaticPin = STATIC_FALLBACK_PIN;
+    try {
+      const savedPin = localStorage.getItem('jikoni_static_admin_pin');
+      if (savedPin) expectedStaticPin = savedPin;
+    } catch {
+      // Ignore storage read errors
+    }
+
+    if (pin !== expectedStaticPin) {
       throw new Error('Incorrect staff passcode.');
     }
     const localToken = `static-staff-${Date.now()}`;
@@ -386,6 +400,50 @@ export default function App() {
     setAdminToken(localToken);
     try {
       sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, localToken);
+    } catch {
+      // Ignore storage errors
+    }
+  };
+
+  const handleChangeAdminPassword = async (newPassword: string) => {
+    if (!adminToken) return;
+
+    if (!usingStaticFallback) {
+      try {
+        const res = await fetch('/api/admin/password', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-token': adminToken,
+          },
+          body: JSON.stringify({ newPassword }),
+        });
+        const ct = res.headers.get('content-type') || '';
+        if (res.ok && ct.includes('application/json')) {
+          const data = (await res.json()) as { ok?: boolean; token?: string };
+          if (data.token) {
+            setAdminToken(data.token);
+            try {
+              sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, data.token);
+            } catch {
+              // Ignore storage errors
+            }
+          }
+          return;
+        }
+        if (res.status >= 400 && res.status < 500 && res.status !== 404 && res.status !== 405) {
+          const data = ct.includes('application/json') ? ((await res.json()) as { error?: string }) : {};
+          throw new Error(data.error || 'Unable to update passcode.');
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message !== 'Failed to fetch') {
+          throw err;
+        }
+      }
+    }
+
+    try {
+      localStorage.setItem('jikoni_static_admin_pin', newPassword);
     } catch {
       // Ignore storage errors
     }
@@ -712,6 +770,7 @@ export default function App() {
           handleChangeTable(num, true);
           setRoute({ zone: 'customer', view: 'menu' });
         }}
+        onChangePassword={handleChangeAdminPassword}
         onLockPortal={handleLockAdminPortal}
         currentTable={tableNumber}
       />

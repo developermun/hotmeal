@@ -11,17 +11,97 @@ interface StoreState {
   nextOrderSeq: number;
 }
 
+interface AdminAuthConfig {
+  salt: string;
+  passwordHash: string;
+  updatedAt: string;
+}
+
 const DATA_DIR = path.join(process.cwd(), 'data');
 const STORE_PATH = path.join(DATA_DIR, 'orders.json');
+const ADMIN_AUTH_PATH = path.join(DATA_DIR, 'admin-auth.json');
 
-const ADMIN_PIN = process.env.ADMIN_PIN || '2540';
-const ADMIN_TOKEN_SECRET =
-  process.env.ADMIN_SECRET ||
-  crypto.createHash('sha256').update(`jikoni-staff-${ADMIN_PIN}`).digest('hex');
+const DEFAULT_STAFF_PIN = '2540';
+
+function getConfiguredEnvPin(): string | null {
+  let raw = (process.env.ADMIN_PIN || '').trim();
+  if (
+    (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) ||
+    (raw.startsWith("'") && raw.endsWith("'") && raw.length >= 2)
+  ) {
+    raw = raw.slice(1, -1).trim();
+  }
+  if (!raw || raw.startsWith('MY_')) return null;
+  return raw;
+}
+
+function getTokenSecret(): string {
+  const envSecret = (process.env.ADMIN_SECRET || '').trim();
+  if (envSecret) return envSecret;
+  const seedBase = getConfiguredEnvPin() || DEFAULT_STAFF_PIN;
+  return crypto.createHash('sha256').update(`jikoni-staff-${seedBase}`).digest('hex');
+}
+
+function hashPassword(password: string, salt: string): string {
+  return crypto.scryptSync(password, salt, 32).toString('hex');
+}
+
+function readCustomAdminAuth(): AdminAuthConfig | null {
+  try {
+    if (!fs.existsSync(ADMIN_AUTH_PATH)) return null;
+    const raw = fs.readFileSync(ADMIN_AUTH_PATH, 'utf-8');
+    const parsed = JSON.parse(raw) as AdminAuthConfig;
+    if (parsed && typeof parsed.salt === 'string' && typeof parsed.passwordHash === 'string') {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function saveCustomAdminAuth(newPassword: string): void {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = hashPassword(newPassword, salt);
+  const payload: AdminAuthConfig = {
+    salt,
+    passwordHash,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(ADMIN_AUTH_PATH, JSON.stringify(payload, null, 2), 'utf-8');
+}
+
+function timingSafeMatch(aStr: string, bStr: string): boolean {
+  const a = Buffer.from(aStr);
+  const b = Buffer.from(bStr);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function verifyAdminPin(inputPin: string): boolean {
+  const cleaned = String(inputPin).trim();
+  if (!cleaned) return false;
+
+  const customAuth = readCustomAdminAuth();
+  if (customAuth) {
+    const candidateHash = hashPassword(cleaned, customAuth.salt);
+    return timingSafeMatch(candidateHash, customAuth.passwordHash);
+  }
+
+  const envPin = getConfiguredEnvPin();
+  if (envPin) {
+    return timingSafeMatch(cleaned, envPin);
+  }
+
+  return timingSafeMatch(cleaned, DEFAULT_STAFF_PIN);
+}
 
 function issueAdminToken(): string {
   const payload = `staff:${Date.now()}`;
-  const sig = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(payload).digest('hex');
+  const sig = crypto.createHmac('sha256', getTokenSecret()).update(payload).digest('hex');
   return `${payload}.${sig}`;
 }
 
@@ -31,20 +111,10 @@ function verifyAdminToken(token: string | undefined): boolean {
   if (parts.length !== 2) return false;
   const [payload, sig] = parts;
   const expectedSig = crypto
-    .createHmac('sha256', ADMIN_TOKEN_SECRET)
+    .createHmac('sha256', getTokenSecret())
     .update(payload)
     .digest('hex');
-  const sigBuf = Buffer.from(sig);
-  const expBuf = Buffer.from(expectedSig);
-  if (sigBuf.length !== expBuf.length) return false;
-  return crypto.timingSafeEqual(sigBuf, expBuf);
-}
-
-function verifyAdminPin(inputPin: string): boolean {
-  const a = Buffer.from(String(inputPin).trim());
-  const b = Buffer.from(ADMIN_PIN);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+  return timingSafeMatch(sig, expectedSig);
 }
 
 function requireAdmin(req: express.Request, res: express.Response): boolean {
@@ -174,13 +244,26 @@ async function startServer() {
     res.json({ ok: true, service: 'jikoni-table' });
   });
 
-  // Staff Admin PIN verification
+  // Staff Admin PIN / Password verification
   app.post('/api/admin/verify', (req, res) => {
     const { pin } = req.body as { pin?: string };
     if (!pin || !verifyAdminPin(pin)) {
       res.status(401).json({ error: 'Incorrect staff passcode. Please try again.' });
       return;
     }
+    res.json({ ok: true, token: issueAdminToken() });
+  });
+
+  // Update staff admin password (requires valid current session token)
+  app.post('/api/admin/password', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { newPassword } = req.body as { newPassword?: string };
+    const cleaned = String(newPassword || '').trim();
+    if (cleaned.length < 4 || cleaned.length > 64) {
+      res.status(400).json({ error: 'Password must be between 4 and 64 characters.' });
+      return;
+    }
+    saveCustomAdminAuth(cleaned);
     res.json({ ok: true, token: issueAdminToken() });
   });
 
