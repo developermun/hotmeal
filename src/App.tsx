@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ShoppingBag } from 'lucide-react';
+import { AdminLoginGate } from './components/AdminLoginGate.tsx';
+import { AdminPortal, type AdminSection } from './components/AdminPortal.tsx';
 import { DishModal } from './components/DishModal.tsx';
-import { Header } from './components/Header.tsx';
+import { Header, type CustomerView } from './components/Header.tsx';
 import { HeroBanner } from './components/HeroBanner.tsx';
-import { KitchenBoardView } from './components/KitchenBoardView.tsx';
 import { MenuSection } from './components/MenuSection.tsx';
 import { OrderDrawer } from './components/OrderDrawer.tsx';
-import { QrStudioView } from './components/QrStudioView.tsx';
 import { TableTrackerView } from './components/TableTrackerView.tsx';
 import { formatKES } from './data/menu.ts';
 import type {
-  AppView,
   CartItem,
   DishOption,
   MenuItem,
+  OrderItemRecord,
   OrderStatus,
   ServiceRequest,
   ServiceRequestType,
@@ -21,17 +21,40 @@ import type {
   TableOrder,
 } from './types.ts';
 
-function parseTableFromUrl(): { table: number; fromQr: boolean } {
-  if (typeof window === 'undefined') return { table: 4, fromQr: false };
+type RouteZone =
+  | { zone: 'customer'; view: CustomerView }
+  | { zone: 'admin'; section: AdminSection };
+
+function parseRouteFromUrl(): { route: RouteZone; table: number; fromQr: boolean } {
+  if (typeof window === 'undefined') {
+    return { route: { zone: 'customer', view: 'menu' }, table: 4, fromQr: false };
+  }
+
+  const pathname = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
   const params = new URLSearchParams(window.location.search);
-  const raw = params.get('table');
-  if (raw) {
-    const num = Number(raw);
+  const viewParam = params.get('view')?.toLowerCase();
+
+  let route: RouteZone = { zone: 'customer', view: 'menu' };
+  if (pathname === '/admin' || pathname === '/kitchen' || viewParam === 'admin' || viewParam === 'kitchen') {
+    route = { zone: 'admin', section: 'orders' };
+  } else if (pathname === '/qr-codes' || pathname === '/qr' || viewParam === 'qr') {
+    route = { zone: 'admin', section: 'qr' };
+  } else if (pathname === '/tracker' || viewParam === 'tracker') {
+    route = { zone: 'customer', view: 'tracker' };
+  }
+
+  let table = 4;
+  let fromQr = false;
+  const rawTable = params.get('table');
+  if (rawTable) {
+    const num = Number(rawTable);
     if (Number.isInteger(num) && num >= 1 && num <= 99) {
-      return { table: num, fromQr: true };
+      table = num;
+      fromQr = true;
     }
   }
-  return { table: 4, fromQr: false };
+
+  return { route, table, fromQr };
 }
 
 function loadCartForTable(tableNumber: number): CartItem[] {
@@ -45,20 +68,136 @@ function loadCartForTable(tableNumber: number): CartItem[] {
   }
 }
 
-export default function App() {
-  const initialTable = useMemo(() => parseTableFromUrl(), []);
-  const [tableNumber, setTableNumber] = useState<number>(initialTable.table);
-  const [scannedViaQr, setScannedViaQr] = useState<boolean>(initialTable.fromQr);
-  const [activeView, setActiveView] = useState<AppView>('menu');
+const ADMIN_TOKEN_STORAGE_KEY = 'jikoni_admin_token';
+const FALLBACK_ORDERS_KEY = 'jikoni_static_orders_v1';
+const FALLBACK_REQUESTS_KEY = 'jikoni_static_requests_v1';
+const STATIC_FALLBACK_PIN = '2540';
 
-  const [cart, setCart] = useState<CartItem[]>(() => loadCartForTable(initialTable.table));
+function getStaticFallbackOrders(): TableOrder[] {
+  try {
+    const raw = localStorage.getItem(FALLBACK_ORDERS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  const now = Date.now();
+  const seed: TableOrder[] = [
+    {
+      id: 'ord-102',
+      orderNumber: 'JK-102',
+      tableNumber: 2,
+      guestName: 'Amina W.',
+      items: [
+        {
+          menuItemId: 'wali-nazi-samaki',
+          name: 'Wali wa Nazi & Samaki',
+          quantity: 1,
+          unitPrice: 980,
+          selectedOptionLabel: 'Tamarind-Coconut Glaze',
+          spiceLevel: 'Medium',
+        },
+        {
+          menuItemId: 'mahamri-mbaazi',
+          name: 'Mahamri & Mbaazi',
+          quantity: 1,
+          unitPrice: 380,
+          selectedOptionLabel: '3 Mahamri + Mbaazi Bowl',
+        },
+      ],
+      subtotal: 1360,
+      serviceNote: 'Please bring extra lime wedges.',
+      status: 'Preparing',
+      createdAt: new Date(now - 9 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 4 * 60 * 1000).toISOString(),
+      estimatedMinutes: 22,
+    },
+    {
+      id: 'ord-103',
+      orderNumber: 'JK-103',
+      tableNumber: 6,
+      guestName: 'David K.',
+      items: [
+        {
+          menuItemId: 'ugali-nyama-choma',
+          name: 'Ugali & Nyama Choma',
+          quantity: 2,
+          unitPrice: 1150,
+          selectedOptionLabel: 'Charcoal-Roasted Goat (Mbuzi)',
+          spiceLevel: 'Pilipili Hot',
+        },
+        {
+          menuItemId: 'samosa',
+          name: 'Samosa',
+          quantity: 1,
+          unitPrice: 220,
+          selectedOptionLabel: 'Spiced Minced Beef (2 pcs)',
+          spiceLevel: 'Medium',
+        },
+      ],
+      subtotal: 2520,
+      status: 'Received',
+      createdAt: new Date(now - 3 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 3 * 60 * 1000).toISOString(),
+      estimatedMinutes: 25,
+    },
+  ];
+  try {
+    localStorage.setItem(FALLBACK_ORDERS_KEY, JSON.stringify(seed));
+  } catch {
+    // Ignore storage write errors
+  }
+  return seed;
+}
+
+function getStaticFallbackRequests(): ServiceRequest[] {
+  try {
+    const raw = localStorage.getItem(FALLBACK_REQUESTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return [];
+}
+
+async function parseJsonIfAvailable<T>(res: Response): Promise<T | null> {
+  const ct = res.headers.get('content-type') || '';
+  if (!res.ok || !ct.includes('application/json')) return null;
+  return (await res.json()) as T;
+}
+
+export default function App() {
+  const initialState = useMemo(() => parseRouteFromUrl(), []);
+  const [route, setRoute] = useState<RouteZone>(initialState.route);
+  const [tableNumber, setTableNumber] = useState<number>(initialState.table);
+  const [scannedViaQr, setScannedViaQr] = useState<boolean>(initialState.fromQr);
+
+  // Staff admin session token (kept only in sessionStorage)
+  const [adminToken, setAdminToken] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem(ADMIN_TOKEN_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
+
+  // Customer cart & UI state
+  const [cart, setCart] = useState<CartItem[]>(() => loadCartForTable(initialState.table));
   const [selectedDish, setSelectedDish] = useState<MenuItem | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  const [orders, setOrders] = useState<TableOrder[]>([]);
+  // Scoped order state (customer gets ONLY their table; admin gets all tables)
+  const [tableOrders, setTableOrders] = useState<TableOrder[]>([]);
+  const [adminOrders, setAdminOrders] = useState<TableOrder[]>([]);
   const [serviceRequests, setServiceRequests] = useState<ServiceRequest[]>([]);
   const [loadingOrders, setLoadingOrders] = useState<boolean>(true);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [usingStaticFallback, setUsingStaticFallback] = useState<boolean>(false);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -67,35 +206,101 @@ export default function App() {
     }, 3200);
   }, []);
 
-  const fetchBackendState = useCallback(async (silent = false) => {
-    if (!silent) setLoadingOrders(true);
-    try {
-      const [ordersRes, reqRes] = await Promise.all([
-        fetch('/api/orders'),
-        fetch('/api/service-requests'),
-      ]);
-      if (ordersRes.ok) {
-        const data = (await ordersRes.json()) as { orders: TableOrder[] };
-        setOrders(data.orders || []);
+  // Fetch customer table-scoped orders
+  const fetchCustomerTableOrders = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoadingOrders(true);
+      try {
+        const res = await fetch(`/api/orders?table=${tableNumber}`);
+        const json = await parseJsonIfAvailable<{ orders: TableOrder[] }>(res);
+        if (json) {
+          setUsingStaticFallback(false);
+          setTableOrders(json.orders || []);
+        } else {
+          setUsingStaticFallback(true);
+          setTableOrders(getStaticFallbackOrders().filter((o) => o.tableNumber === tableNumber));
+        }
+      } catch {
+        setUsingStaticFallback(true);
+        setTableOrders(getStaticFallbackOrders().filter((o) => o.tableNumber === tableNumber));
+      } finally {
+        if (!silent) setLoadingOrders(false);
       }
-      if (reqRes.ok) {
-        const data = (await reqRes.json()) as { requests: ServiceRequest[] };
-        setServiceRequests(data.requests || []);
+    },
+    [tableNumber]
+  );
+
+  // Fetch staff admin orders & service requests (authenticated)
+  const fetchAdminState = useCallback(
+    async (silent = false) => {
+      if (!adminToken) return;
+      if (!silent) setLoadingOrders(true);
+      try {
+        const headers = { 'x-admin-token': adminToken };
+        const [ordersRes, reqRes] = await Promise.all([
+          fetch('/api/orders', { headers }),
+          fetch('/api/service-requests', { headers }),
+        ]);
+
+        if (ordersRes.status === 401 || reqRes.status === 401) {
+          setAdminToken(null);
+          try {
+            sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+          } catch {
+            // Ignore storage removal errors
+          }
+          return;
+        }
+
+        const ordersJson = await parseJsonIfAvailable<{ orders: TableOrder[] }>(ordersRes);
+        const reqJson = await parseJsonIfAvailable<{ requests: ServiceRequest[] }>(reqRes);
+
+        if (ordersJson && reqJson) {
+          setUsingStaticFallback(false);
+          setAdminOrders(ordersJson.orders || []);
+          setServiceRequests(reqJson.requests || []);
+        } else {
+          setUsingStaticFallback(true);
+          setAdminOrders(getStaticFallbackOrders());
+          setServiceRequests(getStaticFallbackRequests());
+        }
+      } catch {
+        setUsingStaticFallback(true);
+        setAdminOrders(getStaticFallbackOrders());
+        setServiceRequests(getStaticFallbackRequests());
+      } finally {
+        if (!silent) setLoadingOrders(false);
       }
-    } catch {
-      // Network retry happens on next poll cycle
-    } finally {
-      if (!silent) setLoadingOrders(false);
-    }
-  }, []);
+    },
+    [adminToken]
+  );
 
   useEffect(() => {
-    fetchBackendState(false);
-    const interval = window.setInterval(() => {
-      fetchBackendState(true);
-    }, 5000);
-    return () => window.clearInterval(interval);
-  }, [fetchBackendState]);
+    if (route.zone === 'customer') {
+      fetchCustomerTableOrders(false);
+      const interval = window.setInterval(() => fetchCustomerTableOrders(true), 5000);
+      return () => window.clearInterval(interval);
+    }
+    if (adminToken) {
+      fetchAdminState(false);
+      const interval = window.setInterval(() => fetchAdminState(true), 5000);
+      return () => window.clearInterval(interval);
+    }
+    setLoadingOrders(false);
+    return undefined;
+  }, [route.zone, adminToken, fetchCustomerTableOrders, fetchAdminState]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const next = parseRouteFromUrl();
+      setRoute(next.route);
+      setTableNumber(next.table);
+      setScannedViaQr(next.fromQr);
+      setCart(loadCartForTable(next.table));
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   useEffect(() => {
     try {
@@ -105,11 +310,36 @@ export default function App() {
     }
   }, [cart, tableNumber]);
 
+  const navigateCustomerView = (view: CustomerView, nextTable?: number) => {
+    const targetTable = nextTable ?? tableNumber;
+    setRoute({ zone: 'customer', view });
+    const params = new URLSearchParams(window.location.search);
+    params.delete('view');
+    if (view === 'tracker') {
+      params.set('table', String(targetTable));
+      window.history.pushState({}, '', `/tracker?${params.toString()}`);
+    } else if (params.has('table')) {
+      params.set('table', String(targetTable));
+      window.history.pushState({}, '', `/?${params.toString()}`);
+    } else {
+      window.history.pushState({}, '', '/');
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const navigateAdminSection = (section: AdminSection) => {
+    setRoute({ zone: 'admin', section });
+    window.history.pushState({}, '', section === 'qr' ? '/qr-codes' : '/admin');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const handleChangeTable = (nextTable: number, fromQrScan = false) => {
     setTableNumber(nextTable);
     setScannedViaQr(fromQrScan);
     setCart(loadCartForTable(nextTable));
     const url = new URL(window.location.href);
+    url.pathname = '/';
+    url.searchParams.delete('view');
     url.searchParams.set('table', String(nextTable));
     window.history.replaceState({}, '', url.toString());
     showToast(
@@ -117,6 +347,59 @@ export default function App() {
         ? `QR scanned · Ordered items bound to Table ${String(nextTable).padStart(2, '0')}`
         : `Switched to Table ${String(nextTable).padStart(2, '0')}`
     );
+  };
+
+  const handleVerifyAdminPin = async (pin: string) => {
+    try {
+      const res = await fetch('/api/admin/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin }),
+      });
+
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const data = (await res.json()) as { ok?: boolean; token?: string; error?: string };
+        if (!res.ok || !data.token) {
+          throw new Error(data.error || 'Incorrect staff passcode.');
+        }
+        setAdminToken(data.token);
+        try {
+          sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, data.token);
+        } catch {
+          // Ignore storage errors
+        }
+        return;
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('passcode')) {
+        throw err;
+      }
+    }
+
+    // Static hosting fallback when Express /api/admin/verify is unavailable (404)
+    if (pin !== STATIC_FALLBACK_PIN) {
+      throw new Error('Incorrect staff passcode.');
+    }
+    const localToken = `static-staff-${Date.now()}`;
+    setUsingStaticFallback(true);
+    setAdminToken(localToken);
+    try {
+      sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, localToken);
+    } catch {
+      // Ignore storage errors
+    }
+  };
+
+  const handleLockAdminPortal = () => {
+    setAdminToken(null);
+    setAdminOrders([]);
+    setServiceRequests([]);
+    try {
+      sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors
+    }
   };
 
   const handleQuickAdd = (dish: MenuItem) => {
@@ -229,99 +512,236 @@ export default function App() {
       ...cart.map((c) => (c.category === 'Supper' ? 22 : c.category === 'Lunch' ? 18 : 12))
     );
 
-    const res = await fetch('/api/orders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tableNumber,
-        guestName: guestName || undefined,
-        serviceNote: serviceNote || undefined,
-        estimatedMinutes: estPrep,
-        items: cart.map((c) => ({
-          menuItemId: c.menuItemId,
-          name: c.name,
-          quantity: c.quantity,
-          unitPrice: c.unitPrice,
-          selectedOptionLabel: c.selectedOptionLabel,
-          spiceLevel: c.spiceLevel,
-          notes: c.notes,
-        })),
-      }),
-    });
+    const orderItems: OrderItemRecord[] = cart.map((c) => ({
+      menuItemId: c.menuItemId,
+      name: c.name,
+      quantity: c.quantity,
+      unitPrice: c.unitPrice,
+      selectedOptionLabel: c.selectedOptionLabel,
+      spiceLevel: c.spiceLevel,
+      notes: c.notes,
+    }));
 
-    if (!res.ok) {
-      const errData = (await res.json().catch(() => ({}))) as { error?: string };
-      throw new Error(errData.error || 'Could not submit order to kitchen.');
+    let createdOrder: TableOrder | null = null;
+
+    if (!usingStaticFallback) {
+      try {
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tableNumber,
+            guestName: guestName || undefined,
+            serviceNote: serviceNote || undefined,
+            estimatedMinutes: estPrep,
+            items: orderItems,
+          }),
+        });
+        const data = await parseJsonIfAvailable<{ order: TableOrder; error?: string }>(res);
+        if (data?.order) {
+          createdOrder = data.order;
+        } else if (res.status >= 400 && res.status < 500 && res.status !== 404) {
+          const errData = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(errData.error || 'Could not submit order to kitchen.');
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message !== 'Failed to fetch') {
+          throw err;
+        }
+      }
     }
 
-    const data = (await res.json()) as { order: TableOrder };
-    setOrders((prev) => [data.order, ...prev]);
+    if (!createdOrder) {
+      const existingAll = getStaticFallbackOrders();
+      const subtotal = orderItems.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0);
+      const seq = 104 + existingAll.length;
+      const nowIso = new Date().toISOString();
+      createdOrder = {
+        id: `ord-${seq}-${Date.now().toString(36)}`,
+        orderNumber: `JK-${seq}`,
+        tableNumber,
+        guestName: guestName || undefined,
+        items: orderItems,
+        subtotal,
+        serviceNote: serviceNote || undefined,
+        status: 'Received',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        estimatedMinutes: estPrep,
+      };
+      try {
+        localStorage.setItem(FALLBACK_ORDERS_KEY, JSON.stringify([createdOrder, ...existingAll]));
+      } catch {
+        // Ignore storage write error
+      }
+    }
+
+    setTableOrders((prev) => [createdOrder as TableOrder, ...prev]);
     setCart([]);
     setDrawerOpen(false);
-    setActiveView('tracker');
-    showToast(`Order ${data.order.orderNumber} sent to kitchen for Table ${tableNumber}`);
+    navigateCustomerView('tracker', tableNumber);
+    showToast(`Order ${createdOrder.orderNumber} sent to kitchen for Table ${tableNumber}`);
   };
 
   const handleRequestService = async (type: ServiceRequestType) => {
-    const res = await fetch('/api/service-requests', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tableNumber, type }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { request: ServiceRequest };
-      setServiceRequests((prev) => [data.request, ...prev]);
+    let created: ServiceRequest | null = null;
+
+    if (!usingStaticFallback) {
+      try {
+        const res = await fetch('/api/service-requests', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tableNumber, type }),
+        });
+        const data = await parseJsonIfAvailable<{ request: ServiceRequest }>(res);
+        if (data?.request) created = data.request;
+      } catch {
+        // Fall through to local fallback
+      }
+    }
+
+    if (!created) {
+      const existingReqs = getStaticFallbackRequests();
+      created = {
+        id: `srv-${Date.now().toString(36)}`,
+        tableNumber,
+        type,
+        status: 'Open',
+        createdAt: new Date().toISOString(),
+      };
+      try {
+        localStorage.setItem(FALLBACK_REQUESTS_KEY, JSON.stringify([created, ...existingReqs]));
+      } catch {
+        // Ignore storage write error
+      }
     }
   };
 
   const handleAdvanceOrderStatus = async (orderId: string, nextStatus: OrderStatus) => {
-    const res = await fetch(`/api/orders/${orderId}/status`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: nextStatus }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { order: TableOrder };
-      setOrders((prev) => prev.map((o) => (o.id === orderId ? data.order : o)));
+    if (!adminToken) return;
+    let updatedOrder: TableOrder | null = null;
+
+    if (!usingStaticFallback) {
+      try {
+        const res = await fetch(`/api/orders/${orderId}/status`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-token': adminToken,
+          },
+          body: JSON.stringify({ status: nextStatus }),
+        });
+        const data = await parseJsonIfAvailable<{ order: TableOrder }>(res);
+        if (data?.order) updatedOrder = data.order;
+      } catch {
+        // Fall through to local fallback
+      }
     }
+
+    setAdminOrders((prev) => {
+      const next = prev.map((o) =>
+        o.id === orderId
+          ? updatedOrder || { ...o, status: nextStatus, updatedAt: new Date().toISOString() }
+          : o
+      );
+      if (!updatedOrder) {
+        try {
+          localStorage.setItem(FALLBACK_ORDERS_KEY, JSON.stringify(next));
+        } catch {
+          // Ignore storage write error
+        }
+      }
+      return next;
+    });
   };
 
   const handleResolveServiceRequest = async (requestId: string) => {
-    const res = await fetch(`/api/service-requests/${requestId}`, {
-      method: 'PATCH',
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { request: ServiceRequest };
-      setServiceRequests((prev) => prev.map((r) => (r.id === requestId ? data.request : r)));
+    if (!adminToken) return;
+    let updatedReq: ServiceRequest | null = null;
+
+    if (!usingStaticFallback) {
+      try {
+        const res = await fetch(`/api/service-requests/${requestId}`, {
+          method: 'PATCH',
+          headers: { 'x-admin-token': adminToken },
+        });
+        const data = await parseJsonIfAvailable<{ request: ServiceRequest }>(res);
+        if (data?.request) updatedReq = data.request;
+      } catch {
+        // Fall through to local fallback
+      }
     }
+
+    setServiceRequests((prev) => {
+      const next = prev.map((r) =>
+        r.id === requestId ? updatedReq || { ...r, status: 'Resolved' as const } : r
+      );
+      if (!updatedReq) {
+        try {
+          localStorage.setItem(FALLBACK_REQUESTS_KEY, JSON.stringify(next));
+        } catch {
+          // Ignore storage write error
+        }
+      }
+      return next;
+    });
   };
 
+  // ==================== ISOLATED ADMIN PORTAL ROUTE ====================
+  if (route.zone === 'admin') {
+    if (!adminToken) {
+      return (
+        <AdminLoginGate
+          onVerifyPin={handleVerifyAdminPin}
+          onReturnToMenu={() => navigateCustomerView('menu')}
+        />
+      );
+    }
+
+    return (
+      <AdminPortal
+        section={route.section}
+        onSelectSection={navigateAdminSection}
+        orders={adminOrders}
+        serviceRequests={serviceRequests}
+        loadingOrders={loadingOrders}
+        onAdvanceOrderStatus={handleAdvanceOrderStatus}
+        onResolveServiceRequest={handleResolveServiceRequest}
+        onRefresh={() => fetchAdminState(false)}
+        onSimulateScan={(num) => {
+          handleChangeTable(num, true);
+          setRoute({ zone: 'customer', view: 'menu' });
+        }}
+        onLockPortal={handleLockAdminPortal}
+        currentTable={tableNumber}
+      />
+    );
+  }
+
+  // ==================== CUSTOMER DINE-IN ROUTE ====================
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
   const cartSubtotal = cart.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
-  const activeTableOrdersCount = orders.filter(
-    (o) => o.tableNumber === tableNumber && o.status !== 'Served'
-  ).length;
+  const activeTableOrdersCount = tableOrders.filter((o) => o.status !== 'Served').length;
 
   return (
     <div className="min-h-screen flex flex-col bg-[#110E0B] text-[#F6EFE4]">
       <Header
-        activeView={activeView}
-        onSelectView={setActiveView}
+        activeView={route.view}
+        onSelectView={(v) => navigateCustomerView(v)}
         cartCount={cartCount}
         onOpenCart={() => setDrawerOpen(true)}
       />
 
       <main className="flex-1 pb-20 md:pb-12">
-        {activeView === 'menu' && (
+        {route.view === 'menu' && (
           <>
             <HeroBanner
               tableNumber={tableNumber}
               scannedViaQr={scannedViaQr}
               onChangeTable={(t) => handleChangeTable(t, false)}
-              onOpenQrView={() => setActiveView('qr')}
               onRequestService={handleRequestService}
               activeOrdersCount={activeTableOrdersCount}
-              onViewTracker={() => setActiveView('tracker')}
+              onViewTracker={() => navigateCustomerView('tracker')}
             />
             <MenuSection
               cart={cart}
@@ -332,39 +752,18 @@ export default function App() {
           </>
         )}
 
-        {activeView === 'tracker' && (
+        {route.view === 'tracker' && (
           <TableTrackerView
             tableNumber={tableNumber}
-            orders={orders}
+            orders={tableOrders}
             loading={loadingOrders}
-            onBackToMenu={() => setActiveView('menu')}
+            onBackToMenu={() => navigateCustomerView('menu')}
             onRequestService={handleRequestService}
-          />
-        )}
-
-        {activeView === 'qr' && (
-          <QrStudioView
-            currentTable={tableNumber}
-            onSimulateScan={(num) => {
-              handleChangeTable(num, true);
-              setActiveView('menu');
-            }}
-          />
-        )}
-
-        {activeView === 'kitchen' && (
-          <KitchenBoardView
-            orders={orders}
-            serviceRequests={serviceRequests}
-            loading={loadingOrders}
-            onAdvanceOrderStatus={handleAdvanceOrderStatus}
-            onResolveServiceRequest={handleResolveServiceRequest}
-            onRefresh={() => fetchBackendState(false)}
           />
         )}
       </main>
 
-      {/* Quiet Footer */}
+      {/* Customer-Only Footer (Zero Admin/QR links exposed) */}
       <footer className="border-t border-[#2A2119] bg-[#14100C] py-8">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-[#9E8B73]">
           <div className="space-y-1">
@@ -374,38 +773,24 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-5">
             <button
               type="button"
-              onClick={() => setActiveView('menu')}
+              onClick={() => navigateCustomerView('menu')}
               className="hover:text-[#E3BC78] transition-colors"
             >
               Digital Menu
             </button>
             <button
               type="button"
-              onClick={() => setActiveView('tracker')}
+              onClick={() => navigateCustomerView('tracker')}
               className="hover:text-[#E3BC78] transition-colors"
             >
-              Table Tracker
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveView('qr')}
-              className="hover:text-[#E3BC78] transition-colors"
-            >
-              Table QR Studio
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveView('kitchen')}
-              className="hover:text-[#E3BC78] transition-colors"
-            >
-              Kitchen Board
+              Table {String(tableNumber).padStart(2, '0')} Orders
             </button>
           </div>
         </div>
       </footer>
 
-      {/* Mobile Compact Bottom Tray Bar (only when cart > 0 on mobile, well within 15% sticky budget) */}
-      {cartCount > 0 && activeView === 'menu' && !drawerOpen && (
+      {/* Mobile Compact Bottom Tray Bar */}
+      {cartCount > 0 && route.view === 'menu' && !drawerOpen && (
         <div className="md:hidden fixed bottom-0 left-0 right-0 z-30 p-3 bg-gradient-to-t from-[#110E0B] via-[#110E0B]/95 to-transparent">
           <button
             type="button"

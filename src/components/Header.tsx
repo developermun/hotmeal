@@ -1,25 +1,24 @@
 import { useState } from 'react';
 import { Menu, ShoppingBag, X } from 'lucide-react';
-import type { AppView } from '../types.ts';
+
+export type CustomerView = 'menu' | 'tracker';
 
 interface HeaderProps {
-  activeView: AppView;
-  onSelectView: (view: AppView) => void;
+  activeView: CustomerView;
+  onSelectView: (view: CustomerView) => void;
   cartCount: number;
   onOpenCart: () => void;
 }
 
-const NAV_ITEMS: { id: AppView; label: string }[] = [
+const NAV_ITEMS: { id: CustomerView; label: string }[] = [
   { id: 'menu', label: 'Menu' },
   { id: 'tracker', label: 'Table Tracker' },
-  { id: 'qr', label: 'QR Codes' },
-  { id: 'kitchen', label: 'Kitchen Board' },
 ];
 
 export function Header({ activeView, onSelectView, cartCount, onOpenCart }: HeaderProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  const handleNavClick = (view: AppView) => {
+  const handleNavClick = (view: CustomerView) => {
     onSelectView(view);
     setMobileNavOpen(false);
   };
@@ -48,8 +47,8 @@ export function Header({ activeView, onSelectView, cartCount, onOpenCart }: Head
           </button>
         </div>
 
-        {/* Zone 2: Clean single-line text links */}
-        <nav className="hidden md:flex items-center gap-7 text-sm font-medium" aria-label="Primary navigation">
+        {/* Zone 2: Clean single-line customer navigation links */}
+        <nav className="hidden md:flex items-center gap-7 text-sm font-medium" aria-label="Customer navigation">
           {NAV_ITEMS.map((item) => {
             const isActive = activeView === item.id;
             return (
@@ -97,7 +96,7 @@ export function Header({ activeView, onSelectView, cartCount, onOpenCart }: Head
       {mobileNavOpen && (
         <nav
           className="md:hidden border-t border-[#2A2119] bg-[#16120E] px-4 py-3 space-y-1"
-          aria-label="Mobile navigation"
+          aria-label="Mobile customer navigation"
         >
           {NAV_ITEMS.map((item) => {
             const isActive = activeView === item.id;

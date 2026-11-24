@@ -1,4 +1,4 @@
-import { BellRing, ChevronDown, QrCode, ReceiptText } from 'lucide-react';
+import { BellRing, ChevronDown, ReceiptText } from 'lucide-react';
 import { useState } from 'react';
 import type { ServiceRequestType } from '../types.ts';
 
@@ -6,7 +6,6 @@ interface HeroBannerProps {
   tableNumber: number;
   scannedViaQr: boolean;
   onChangeTable: (table: number) => void;
-  onOpenQrView: () => void;
   onRequestService: (type: ServiceRequestType) => Promise<void>;
   activeOrdersCount: number;
   onViewTracker: () => void;
@@ -18,7 +17,6 @@ export function HeroBanner({
   tableNumber,
   scannedViaQr,
   onChangeTable,
-  onOpenQrView,
   onRequestService,
   activeOrdersCount,
   onViewTracker,
@@ -143,16 +141,6 @@ export function HeroBanner({
                 >
                   <ReceiptText className="w-3.5 h-3.5 text-[#C99A4E]" />
                   <span>{sendingType === 'Request Bill' ? 'Sending...' : 'Request Bill'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={onOpenQrView}
-                  className="inline-flex items-center justify-center gap-1.5 min-h-[40px] px-3 py-2 rounded-lg bg-[#231C16] border border-[#352A21] text-xs font-medium text-[#C99A4E] hover:border-[#C99A4E] transition-colors whitespace-nowrap"
-                  title="View printable QR codes for all tables"
-                >
-                  <QrCode className="w-3.5 h-3.5" />
-                  <span>Table QRs</span>
                 </button>
               </div>
 

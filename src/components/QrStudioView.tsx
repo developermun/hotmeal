@@ -8,16 +8,21 @@ interface QrStudioViewProps {
 }
 
 const DEFAULT_TABLES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+const VERCEL_DINE_IN_URL = 'https://hotmeal-olive.vercel.app';
 
 export function QrStudioView({ currentTable, onSimulateScan }: QrStudioViewProps) {
   const [tables, setTables] = useState<number[]>(DEFAULT_TABLES);
   const [customTableInput, setCustomTableInput] = useState('');
+  const [baseUrl, setBaseUrl] = useState<string>(() =>
+    typeof window !== 'undefined' ? window.location.origin : VERCEL_DINE_IN_URL
+  );
   const [qrMap, setQrMap] = useState<Record<number, string>>({});
   const [copiedTable, setCopiedTable] = useState<number | null>(null);
+  const [copiedAdmin, setCopiedAdmin] = useState(false);
 
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-
-  const getTableUrl = (tableNum: number) => `${origin}/?table=${tableNum}`;
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, '') || VERCEL_DINE_IN_URL;
+  const getTableUrl = (tableNum: number) => `${normalizedBaseUrl}/?table=${tableNum}`;
+  const adminUrl = `${normalizedBaseUrl}/admin`;
 
   useEffect(() => {
     let cancelled = false;
@@ -51,7 +56,7 @@ export function QrStudioView({ currentTable, onSimulateScan }: QrStudioViewProps
     return () => {
       cancelled = true;
     };
-  }, [tables, origin]);
+  }, [tables, normalizedBaseUrl]);
 
   const handleAddCustomTable = (e: React.FormEvent) => {
     e.preventDefault();
@@ -69,6 +74,16 @@ export function QrStudioView({ currentTable, onSimulateScan }: QrStudioViewProps
       await navigator.clipboard.writeText(url);
       setCopiedTable(tableNum);
       setTimeout(() => setCopiedTable(null), 2000);
+    } catch {
+      // Clipboard API fallback ignored
+    }
+  };
+
+  const handleCopyAdmin = async () => {
+    try {
+      await navigator.clipboard.writeText(adminUrl);
+      setCopiedAdmin(true);
+      setTimeout(() => setCopiedAdmin(false), 2000);
     } catch {
       // Clipboard API fallback ignored
     }
@@ -95,7 +110,7 @@ export function QrStudioView({ currentTable, onSimulateScan }: QrStudioViewProps
             Printable Table QR Codes
           </h1>
           <p className="text-sm text-[#B4A693]">
-            Every QR code encodes a direct table URL so guests scan with their phone camera and immediately order for that exact table. Use &ldquo;Simulate Scan&rdquo; on any card to preview the diner flow.
+            Every QR code encodes a direct table URL so guests scan with their phone camera and immediately order for that exact table.
           </p>
         </div>
 
@@ -127,6 +142,72 @@ export function QrStudioView({ currentTable, onSimulateScan }: QrStudioViewProps
           >
             <Printer className="w-3.5 h-3.5" />
             <span>Print Table Cards</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Deployment Base URL & Matching Admin Link */}
+      <div className="rounded-xl bg-[#191410] border border-[#2D241C] p-5 grid grid-cols-1 lg:grid-cols-12 gap-5 items-end print:hidden">
+        <div className="lg:col-span-7 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label htmlFor="qr-base-url" className="text-xs font-semibold text-[#E6DAC8]">
+              QR Dine-In Domain Base URL
+            </label>
+            <div className="flex items-center gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setBaseUrl(VERCEL_DINE_IN_URL)}
+                className="text-[#C99A4E] hover:underline font-mono"
+              >
+                Use {VERCEL_DINE_IN_URL}
+              </button>
+              {typeof window !== 'undefined' && window.location.origin !== VERCEL_DINE_IN_URL && (
+                <>
+                  <span className="text-[#4A3C2F]" aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    onClick={() => setBaseUrl(window.location.origin)}
+                    className="text-[#9E8B73] hover:text-[#F6EFE4]"
+                  >
+                    Use Current Host
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+          <input
+            id="qr-base-url"
+            type="url"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            placeholder="https://hotmeal-olive.vercel.app"
+            className="w-full min-h-[42px] px-3.5 py-2 rounded-xl bg-[#120E0B] border border-[#2D241C] font-mono text-xs sm:text-sm text-[#F6EFE4] focus:outline-none focus:border-[#C99A4E]"
+          />
+        </div>
+
+        <div className="lg:col-span-5 flex items-center justify-between gap-3 rounded-xl bg-[#14100C] border border-[#2A2119] px-4 py-2.5 min-h-[42px]">
+          <div className="min-w-0">
+            <span className="text-[11px] font-mono text-[#9E8B73] block">
+              Matching Admin / Kitchen Link
+            </span>
+            <span className="text-xs font-mono text-[#E3BC78] truncate block">{adminUrl}</span>
+          </div>
+          <button
+            type="button"
+            onClick={handleCopyAdmin}
+            className="inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-lg bg-[#231C16] border border-[#352A21] text-xs font-medium text-[#E6DAC8] hover:border-[#C99A4E] transition-colors whitespace-nowrap shrink-0"
+          >
+            {copiedAdmin ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-[#E3BC78]" />
+                <span>Copied</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-3.5 h-3.5 text-[#9E8B73]" />
+                <span>Copy</span>
+              </>
+            )}
           </button>
         </div>
       </div>
@@ -172,7 +253,7 @@ export function QrStudioView({ currentTable, onSimulateScan }: QrStudioViewProps
 
               <div className="space-y-3">
                 <p className="text-[11px] font-mono text-[#9E8B73] truncate" title={tableUrl}>
-                  /?table={tableNum}
+                  {tableUrl}
                 </p>
 
                 <div className="grid grid-cols-2 gap-2 print:hidden">

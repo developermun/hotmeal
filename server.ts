@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -12,6 +13,48 @@ interface StoreState {
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const STORE_PATH = path.join(DATA_DIR, 'orders.json');
+
+const ADMIN_PIN = process.env.ADMIN_PIN || '2540';
+const ADMIN_TOKEN_SECRET =
+  process.env.ADMIN_SECRET ||
+  crypto.createHash('sha256').update(`jikoni-staff-${ADMIN_PIN}`).digest('hex');
+
+function issueAdminToken(): string {
+  const payload = `staff:${Date.now()}`;
+  const sig = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+
+function verifyAdminToken(token: string | undefined): boolean {
+  if (!token || !token.includes('.')) return false;
+  const parts = token.split('.');
+  if (parts.length !== 2) return false;
+  const [payload, sig] = parts;
+  const expectedSig = crypto
+    .createHmac('sha256', ADMIN_TOKEN_SECRET)
+    .update(payload)
+    .digest('hex');
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length) return false;
+  return crypto.timingSafeEqual(sigBuf, expBuf);
+}
+
+function verifyAdminPin(inputPin: string): boolean {
+  const a = Buffer.from(String(inputPin).trim());
+  const b = Buffer.from(ADMIN_PIN);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function requireAdmin(req: express.Request, res: express.Response): boolean {
+  const token = req.header('x-admin-token');
+  if (!verifyAdminToken(token)) {
+    res.status(401).json({ error: 'Staff authentication required.' });
+    return false;
+  }
+  return true;
+}
 
 function createInitialSeed(): StoreState {
   const now = Date.now();
@@ -131,12 +174,23 @@ async function startServer() {
     res.json({ ok: true, service: 'jikoni-table' });
   });
 
+  // Staff Admin PIN verification
+  app.post('/api/admin/verify', (req, res) => {
+    const { pin } = req.body as { pin?: string };
+    if (!pin || !verifyAdminPin(pin)) {
+      res.status(401).json({ error: 'Incorrect staff passcode. Please try again.' });
+      return;
+    }
+    res.json({ ok: true, token: issueAdminToken() });
+  });
+
+  // Customer table orders (requires ?table=N) OR full restaurant orders (requires staff admin token)
   app.get('/api/orders', (req, res) => {
     const state = readStore();
     const tableParam = req.query.table;
     if (tableParam !== undefined && tableParam !== '') {
       const tableNum = Number(tableParam);
-      if (!Number.isFinite(tableNum) || tableNum < 1) {
+      if (!Number.isInteger(tableNum) || tableNum < 1 || tableNum > 99) {
         res.status(400).json({ error: 'Invalid table number' });
         return;
       }
@@ -146,6 +200,8 @@ async function startServer() {
       res.json({ orders: filtered });
       return;
     }
+
+    if (!requireAdmin(req, res)) return;
 
     const sorted = [...state.orders].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -179,7 +235,15 @@ async function startServer() {
     for (const rawItem of body.items) {
       const qty = Number(rawItem.quantity);
       const unitPrice = Number(rawItem.unitPrice);
-      if (!rawItem.menuItemId || !rawItem.name || !Number.isInteger(qty) || qty < 1 || qty > 50 || !Number.isFinite(unitPrice) || unitPrice < 0) {
+      if (
+        !rawItem.menuItemId ||
+        !rawItem.name ||
+        !Number.isInteger(qty) ||
+        qty < 1 ||
+        qty > 50 ||
+        !Number.isFinite(unitPrice) ||
+        unitPrice < 0
+      ) {
         res.status(400).json({ error: 'Invalid dish item in order.' });
         return;
       }
@@ -189,7 +253,9 @@ async function startServer() {
         name: String(rawItem.name).slice(0, 120),
         quantity: qty,
         unitPrice,
-        selectedOptionLabel: rawItem.selectedOptionLabel ? String(rawItem.selectedOptionLabel).slice(0, 120) : undefined,
+        selectedOptionLabel: rawItem.selectedOptionLabel
+          ? String(rawItem.selectedOptionLabel).slice(0, 120)
+          : undefined,
         spiceLevel: rawItem.spiceLevel,
         notes: rawItem.notes ? String(rawItem.notes).trim().slice(0, 200) : undefined,
       });
@@ -211,7 +277,10 @@ async function startServer() {
       status: 'Received',
       createdAt: nowIso,
       updatedAt: nowIso,
-      estimatedMinutes: typeof body.estimatedMinutes === 'number' && body.estimatedMinutes > 0 ? Math.min(60, Math.round(body.estimatedMinutes)) : 18,
+      estimatedMinutes:
+        typeof body.estimatedMinutes === 'number' && body.estimatedMinutes > 0
+          ? Math.min(60, Math.round(body.estimatedMinutes))
+          : 18,
     };
 
     state.orders.unshift(newOrder);
@@ -221,6 +290,8 @@ async function startServer() {
   });
 
   app.patch('/api/orders/:id/status', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
     const { id } = req.params;
     const { status } = req.body as { status?: OrderStatus };
 
@@ -245,7 +316,9 @@ async function startServer() {
     res.json({ order: state.orders[idx] });
   });
 
-  app.get('/api/service-requests', (_req, res) => {
+  app.get('/api/service-requests', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
     const state = readStore();
     const sorted = [...state.serviceRequests].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -280,6 +353,8 @@ async function startServer() {
   });
 
   app.patch('/api/service-requests/:id', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
     const { id } = req.params;
     const state = readStore();
     const idx = state.serviceRequests.findIndex((r) => r.id === id);
