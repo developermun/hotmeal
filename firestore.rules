@@ -1,0 +1,173 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default-Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==================== GLOBAL PRIMITIVES ====================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn()
+        && request.auth.token.email == 'emmanuelmunamo@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin()
+        || (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    // ==================== ENTITY VALIDATORS ====================
+    function isValidOrderItem(item) {
+      return item is map
+        && item.keys().hasAll(['menuItemId', 'name', 'quantity', 'unitPrice'])
+        && item.keys().hasOnly([
+          'menuItemId',
+          'name',
+          'quantity',
+          'unitPrice',
+          'selectedOptionLabel',
+          'spiceLevel',
+          'notes'
+        ])
+        && item.menuItemId is string && item.menuItemId.size() >= 1 && item.menuItemId.size() <= 80 && item.menuItemId.matches('^[a-zA-Z0-9_\\-]+$')
+        && item.name is string && item.name.size() >= 1 && item.name.size() <= 120
+        && item.quantity is int && item.quantity >= 1 && item.quantity <= 50
+        && (item.unitPrice is int || item.unitPrice is float) && item.unitPrice >= 0 && item.unitPrice <= 100000
+        && (!('selectedOptionLabel' in item) || (item.selectedOptionLabel is string && item.selectedOptionLabel.size() <= 120))
+        && (!('spiceLevel' in item) || item.spiceLevel in ['Mild', 'Medium', 'Pilipili Hot'])
+        && (!('notes' in item) || (item.notes is string && item.notes.size() <= 200));
+    }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll([
+          'orderNumber',
+          'tableNumber',
+          'items',
+          'subtotal',
+          'status',
+          'estimatedMinutes',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'orderNumber',
+          'tableNumber',
+          'guestName',
+          'items',
+          'subtotal',
+          'serviceNote',
+          'status',
+          'estimatedMinutes',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.orderNumber is string && data.orderNumber.size() >= 4 && data.orderNumber.size() <= 20 && data.orderNumber.matches('^JK-[0-9]{3,10}$')
+        && data.tableNumber is int && data.tableNumber >= 1 && data.tableNumber <= 99
+        && (!('guestName' in data) || (data.guestName is string && data.guestName.size() <= 60))
+        && data.items is list && data.items.size() >= 1 && data.items.size() <= 30 && isValidOrderItem(data.items[0])
+        && (data.subtotal is int || data.subtotal is float) && data.subtotal >= 0 && data.subtotal <= 500000
+        && (!('serviceNote' in data) || (data.serviceNote is string && data.serviceNote.size() <= 240))
+        && data.status in ['Received', 'Preparing', 'Ready', 'Served']
+        && data.estimatedMinutes is int && data.estimatedMinutes >= 1 && data.estimatedMinutes <= 120
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidServiceRequest(data) {
+      return data.keys().hasAll(['tableNumber', 'type', 'status', 'createdAt'])
+        && data.keys().hasOnly(['tableNumber', 'type', 'status', 'createdAt'])
+        && data.tableNumber is int && data.tableNumber >= 1 && data.tableNumber <= 99
+        && data.type in ['Waiter Call', 'Request Bill', 'Extra Napkins & Water']
+        && data.status in ['Open', 'Resolved']
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['email', 'role', 'createdAt'])
+        && data.keys().hasOnly(['email', 'role', 'createdAt'])
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 120
+        && data.role == 'admin'
+        && data.createdAt is timestamp;
+    }
+
+    // ==================== COLLECTION RULES ====================
+    match /orders/{orderId} {
+      // Diners can listen to specific order IDs created from their table session; only admins can list all orders.
+      allow get: if isValidId(orderId);
+      allow list: if isAdmin();
+
+      // Any table diner may submit a new order initialized strictly as 'Received' with server timestamps.
+      allow create: if isValidId(orderId)
+        && isValidOrder(incoming())
+        && incoming().status == 'Received'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      // Only verified staff admins may advance kitchen status; static checks run before DB lookup.
+      allow update: if isSignedIn()
+        && isValidId(orderId)
+        && isValidOrder(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && isAdmin();
+
+      allow delete: if false;
+    }
+
+    match /serviceRequests/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && isAdmin();
+      allow list: if isAdmin();
+
+      // Any table diner may submit an Open service request with a server timestamp.
+      allow create: if isValidId(requestId)
+        && isValidServiceRequest(incoming())
+        && incoming().status == 'Open'
+        && incoming().createdAt == request.time;
+
+      // Only verified staff admins may acknowledge/resolve service requests.
+      allow update: if isSignedIn()
+        && isValidId(requestId)
+        && isValidServiceRequest(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status'])
+        && existing().status == 'Open'
+        && incoming().status == 'Resolved'
+        && isAdmin();
+
+      allow delete: if false;
+    }
+
+    match /admins/{uid} {
+      allow get: if isSignedIn() && isValidId(uid) && (request.auth.uid == uid || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn()
+        && isValidId(uid)
+        && isValidAdminUser(incoming())
+        && incoming().createdAt == request.time
+        && isAdmin();
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(uid) && isAdmin();
+    }
+  }
+}

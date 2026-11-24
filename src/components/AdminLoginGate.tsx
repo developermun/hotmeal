@@ -1,28 +1,53 @@
 import { useState } from 'react';
-import { ArrowLeft, Eye, EyeOff, Lock } from 'lucide-react';
+import { ArrowLeft, Check, Copy, Lock, LogOut, ShieldCheck } from 'lucide-react';
+import { BOOTSTRAP_ADMIN_EMAIL } from '../firebase.ts';
 
 interface AdminLoginGateProps {
-  onVerifyPin: (pin: string) => Promise<void>;
+  authLoading: boolean;
+  signedInEmail: string | null;
+  signedInUid: string | null;
+  unauthorizedAccount: boolean;
+  onSignInWithGoogle: () => Promise<void>;
+  onSignOut: () => Promise<void>;
   onReturnToMenu: () => void;
 }
 
-export function AdminLoginGate({ onVerifyPin, onReturnToMenu }: AdminLoginGateProps) {
-  const [pin, setPin] = useState('');
-  const [showPin, setShowPin] = useState(false);
+export function AdminLoginGate({
+  authLoading,
+  signedInEmail,
+  signedInUid,
+  unauthorizedAccount,
+  onSignInWithGoogle,
+  onSignOut,
+  onReturnToMenu,
+}: AdminLoginGateProps) {
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [copiedUid, setCopiedUid] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!pin.trim() || submitting) return;
+  const handleGoogleLogin = async () => {
+    if (submitting) return;
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      await onVerifyPin(pin.trim());
+      await onSignInWithGoogle();
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Incorrect staff passcode.');
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Unable to sign in with Google. Please allow popups and retry.'
+      );
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleCopyUid = async () => {
+    if (!signedInUid) return;
+    try {
+      await navigator.clipboard.writeText(signedInUid);
+      setCopiedUid(true);
+      setTimeout(() => setCopiedUid(false), 2000);
+    } catch {
+      // Ignore clipboard failure
     }
   };
 
@@ -31,7 +56,11 @@ export function AdminLoginGate({ onVerifyPin, onReturnToMenu }: AdminLoginGatePr
       <div className="w-full max-w-md rounded-2xl bg-[#191410] border border-[#2D241C] p-6 sm:p-8 space-y-6 shadow-2xl">
         <div className="space-y-2 text-center">
           <div className="w-11 h-11 rounded-xl bg-[#231C16] border border-[#352A21] flex items-center justify-center mx-auto">
-            <Lock className="w-5 h-5 text-[#C99A4E]" />
+            {unauthorizedAccount ? (
+              <ShieldCheck className="w-5 h-5 text-red-400" />
+            ) : (
+              <Lock className="w-5 h-5 text-[#C99A4E]" />
+            )}
           </div>
           <p className="text-xs font-mono tracking-wider text-[#C99A4E] uppercase pt-2">
             Staff Portal
@@ -40,51 +69,81 @@ export function AdminLoginGate({ onVerifyPin, onReturnToMenu }: AdminLoginGatePr
             Kitchen &amp; Admin Access
           </h1>
           <p className="text-sm text-[#B4A693]">
-            Enter the restaurant staff passcode to view incoming table orders and manage QR stations.
+            Sign in with an authorized restaurant Google account to view live incoming orders and manage table QR stations.
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-1.5">
-            <label htmlFor="staff-pin-input" className="block text-xs font-medium text-[#E6DAC8]">
-              Staff Passcode
-            </label>
-            <div className="relative">
-              <input
-                id="staff-pin-input"
-                type={showPin ? 'text' : 'password'}
-                autoComplete="current-password"
-                value={pin}
-                onChange={(e) => setPin(e.target.value)}
-                placeholder="Enter staff passcode"
-                className="w-full min-h-[46px] pl-4 pr-12 py-2.5 rounded-xl bg-[#120E0B] border border-[#2D241C] font-mono text-base tracking-widest text-[#F6EFE4] placeholder-[#7B6B58] placeholder:tracking-normal placeholder:font-sans focus:outline-none focus:border-[#C99A4E]"
-                autoFocus
-              />
-              <button
-                type="button"
-                onClick={() => setShowPin((prev) => !prev)}
-                aria-label={showPin ? 'Hide passcode' : 'Show passcode'}
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-[#9E8B73] hover:text-[#F6EFE4]"
-              >
-                {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
+        {authLoading ? (
+          <div className="py-6 text-center text-xs text-[#9E8B73]">
+            Checking staff session...
           </div>
+        ) : unauthorizedAccount && signedInEmail ? (
+          <div className="space-y-4">
+            <div className="rounded-xl bg-[#120E0B] border border-red-400/30 p-4 space-y-2 text-left">
+              <p className="text-xs font-semibold text-red-300">
+                Account Not Authorized
+              </p>
+              <p className="text-xs text-[#B4A693] leading-relaxed">
+                Signed in as <span className="text-[#F6EFE4] font-medium">{signedInEmail}</span>. Only{' '}
+                <span className="text-[#E3BC78] font-mono">{BOOTSTRAP_ADMIN_EMAIL}</span> or staff accounts added in Staff Access can view kitchen orders.
+              </p>
+              {signedInUid && (
+                <div className="pt-2 flex items-center justify-between gap-2 border-t border-[#261E17]">
+                  <span className="text-[11px] font-mono text-[#9E8B73] truncate">
+                    UID: {signedInUid}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopyUid}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#231C16] border border-[#352A21] text-[11px] text-[#E6DAC8] hover:border-[#C99A4E] shrink-0"
+                  >
+                    {copiedUid ? (
+                      <>
+                        <Check className="w-3 h-3 text-[#E3BC78]" />
+                        <span>Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" />
+                        <span>Copy UID</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
+            </div>
 
-          {errorMsg && (
-            <p className="text-xs text-red-400" role="alert">
-              {errorMsg}
+            <button
+              type="button"
+              onClick={() => void onSignOut()}
+              className="w-full min-h-[46px] px-5 py-2.5 rounded-xl bg-[#C99A4E] text-[#14100C] text-sm font-semibold hover:bg-[#D7AA60] transition-colors inline-flex items-center justify-center gap-2"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Switch Google Account</span>
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {errorMsg && (
+              <p className="text-xs text-red-400 text-center" role="alert">
+                {errorMsg}
+              </p>
+            )}
+
+            <button
+              type="button"
+              onClick={handleGoogleLogin}
+              disabled={submitting}
+              className="w-full min-h-[48px] px-5 py-2.5 rounded-xl bg-[#C99A4E] text-[#14100C] text-sm font-semibold hover:bg-[#D7AA60] disabled:opacity-50 transition-colors inline-flex items-center justify-center gap-2.5"
+            >
+              <span>{submitting ? 'Signing in...' : 'Sign in with Google'}</span>
+            </button>
+
+            <p className="text-[11px] text-center text-[#8C7A64]">
+              Primary owner access: <span className="font-mono text-[#B4A693]">{BOOTSTRAP_ADMIN_EMAIL}</span>
             </p>
-          )}
-
-          <button
-            type="submit"
-            disabled={submitting || !pin.trim()}
-            className="w-full min-h-[46px] px-5 py-2.5 rounded-xl bg-[#C99A4E] text-[#14100C] text-sm font-semibold hover:bg-[#D7AA60] disabled:opacity-50 transition-colors"
-          >
-            {submitting ? 'Verifying...' : 'Unlock Admin Dashboard'}
-          </button>
-        </form>
+          </div>
+        )}
 
         <div className="pt-4 border-t border-[#261E17] text-center">
           <button

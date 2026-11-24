@@ -1,23 +1,33 @@
 import { useState } from 'react';
-import { KeyRound, LogOut, X } from 'lucide-react';
+import { LogOut, Trash2, UserPlus, Users, X } from 'lucide-react';
 import type { OrderStatus, ServiceRequest, TableOrder } from '../types.ts';
 import { KitchenBoardView } from './KitchenBoardView.tsx';
 import { QrStudioView } from './QrStudioView.tsx';
 
 export type AdminSection = 'orders' | 'qr';
 
+export interface StaffAdminRecord {
+  uid: string;
+  email: string;
+  role: 'admin';
+  createdAt: string;
+}
+
 interface AdminPortalProps {
   section: AdminSection;
   onSelectSection: (section: AdminSection) => void;
   orders: TableOrder[];
   serviceRequests: ServiceRequest[];
+  staffAdmins: StaffAdminRecord[];
+  adminEmail: string | null;
   loadingOrders: boolean;
   onAdvanceOrderStatus: (orderId: string, nextStatus: OrderStatus) => Promise<void>;
   onResolveServiceRequest: (requestId: string) => Promise<void>;
   onRefresh: () => void;
   onSimulateScan: (tableNumber: number) => void;
-  onChangePassword: (newPassword: string) => Promise<void>;
-  onLockPortal: () => void;
+  onAddStaffAdmin: (uid: string, email: string) => Promise<void>;
+  onRemoveStaffAdmin: (uid: string) => Promise<void>;
+  onLockPortal: () => Promise<void>;
   currentTable: number;
 }
 
@@ -26,51 +36,51 @@ export function AdminPortal({
   onSelectSection,
   orders,
   serviceRequests,
+  staffAdmins,
+  adminEmail,
   loadingOrders,
   onAdvanceOrderStatus,
   onResolveServiceRequest,
   onRefresh,
   onSimulateScan,
-  onChangePassword,
+  onAddStaffAdmin,
+  onRemoveStaffAdmin,
   onLockPortal,
   currentTable,
 }: AdminPortalProps) {
-  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [savingPw, setSavingPw] = useState(false);
-  const [pwError, setPwError] = useState<string | null>(null);
-  const [pwSuccess, setPwSuccess] = useState<string | null>(null);
+  const [staffModalOpen, setStaffModalOpen] = useState(false);
+  const [newStaffUid, setNewStaffUid] = useState('');
+  const [newStaffEmail, setNewStaffEmail] = useState('');
+  const [savingStaff, setSavingStaff] = useState(false);
+  const [staffError, setStaffError] = useState<string | null>(null);
+  const [staffSuccess, setStaffSuccess] = useState<string | null>(null);
 
-  const handlePasswordSubmit = async (e: React.FormEvent) => {
+  const handleAddStaffSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setPwError(null);
-    setPwSuccess(null);
+    setStaffError(null);
+    setStaffSuccess(null);
 
-    const trimmed = newPassword.trim();
-    if (trimmed.length < 4) {
-      setPwError('Passcode must be at least 4 characters.');
+    const uid = newStaffUid.trim();
+    const email = newStaffEmail.trim();
+    if (!uid || !/^[a-zA-Z0-9_-]{4,128}$/.test(uid)) {
+      setStaffError('Enter a valid Firebase User UID (alphanumeric, at least 4 characters).');
       return;
     }
-    if (trimmed !== confirmPassword.trim()) {
-      setPwError('Passcodes do not match.');
+    if (!email || !email.includes('@')) {
+      setStaffError('Enter the staff member Google email address.');
       return;
     }
 
-    setSavingPw(true);
+    setSavingStaff(true);
     try {
-      await onChangePassword(trimmed);
-      setPwSuccess('Staff passcode updated.');
-      setNewPassword('');
-      setConfirmPassword('');
-      setTimeout(() => {
-        setPasswordModalOpen(false);
-        setPwSuccess(null);
-      }, 1200);
+      await onAddStaffAdmin(uid, email);
+      setStaffSuccess(`Added ${email} as kitchen staff.`);
+      setNewStaffUid('');
+      setNewStaffEmail('');
     } catch (err) {
-      setPwError(err instanceof Error ? err.message : 'Unable to update passcode.');
+      setStaffError(err instanceof Error ? err.message : 'Unable to add staff account.');
     } finally {
-      setSavingPw(false);
+      setSavingStaff(false);
     }
   };
 
@@ -118,21 +128,21 @@ export function AdminPortal({
 
             <button
               type="button"
-              onClick={() => setPasswordModalOpen(true)}
+              onClick={() => setStaffModalOpen(true)}
               className="hidden sm:inline-flex items-center gap-1.5 py-1 text-[#B4A693] hover:text-[#F6EFE4] whitespace-nowrap shrink-0 transition-colors"
             >
-              <KeyRound className="w-3.5 h-3.5 text-[#C99A4E]" />
-              <span>Passcode</span>
+              <Users className="w-3.5 h-3.5 text-[#C99A4E]" />
+              <span>Staff Access</span>
             </button>
           </nav>
 
           <button
             type="button"
-            onClick={onLockPortal}
+            onClick={() => void onLockPortal()}
             className="inline-flex items-center gap-2 min-h-[40px] px-4 py-2 rounded-lg bg-[#231C16] border border-[#352A21] text-xs font-semibold text-[#E6DAC8] hover:border-[#C99A4E] transition-colors whitespace-nowrap shrink-0"
           >
             <LogOut className="w-3.5 h-3.5 text-[#C99A4E]" />
-            <span>Lock Portal</span>
+            <span>Sign Out</span>
           </button>
         </div>
       </header>
@@ -155,28 +165,32 @@ export function AdminPortal({
         )}
       </main>
 
-      {/* Change Staff Passcode Modal */}
-      {passwordModalOpen && (
+      {/* Staff Access Management Modal */}
+      {staffModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
           role="dialog"
           aria-modal="true"
-          aria-label="Update staff passcode"
+          aria-label="Manage authorized staff"
           onClick={(e) => {
-            if (e.target === e.currentTarget) setPasswordModalOpen(false);
+            if (e.target === e.currentTarget) setStaffModalOpen(false);
           }}
         >
-          <form
-            onSubmit={handlePasswordSubmit}
-            className="w-full max-w-sm rounded-2xl bg-[#191410] border border-[#2D241C] p-6 space-y-4 shadow-2xl"
-          >
+          <div className="w-full max-w-md rounded-2xl bg-[#191410] border border-[#2D241C] p-6 space-y-5 shadow-2xl">
             <div className="flex items-center justify-between">
-              <h2 className="font-display text-xl font-semibold text-[#F6EFE4]">
-                Set Staff Passcode
-              </h2>
+              <div>
+                <h2 className="font-display text-xl font-semibold text-[#F6EFE4]">
+                  Authorized Kitchen Staff
+                </h2>
+                {adminEmail && (
+                  <p className="text-[11px] font-mono text-[#9E8B73] mt-0.5">
+                    Signed in: {adminEmail}
+                  </p>
+                )}
+              </div>
               <button
                 type="button"
-                onClick={() => setPasswordModalOpen(false)}
+                onClick={() => setStaffModalOpen(false)}
                 aria-label="Close"
                 className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg text-[#9E8B73] hover:text-[#F6EFE4]"
               >
@@ -184,52 +198,78 @@ export function AdminPortal({
               </button>
             </div>
 
-            <p className="text-xs text-[#B4A693]">
-              Update the passcode required to open the Admin &amp; Kitchen Portal.
-            </p>
-
-            <div className="space-y-3">
+            <form onSubmit={handleAddStaffSubmit} className="space-y-3 pt-1 border-t border-[#261E17]">
+              <p className="text-xs text-[#B4A693]">
+                Add another kitchen tablet or staff member by entering their Firebase UID (shown if they sign in at /admin) and Google email.
+              </p>
               <div>
-                <label htmlFor="new-staff-pw" className="block text-xs text-[#E6DAC8] mb-1">
-                  New Passcode
+                <label htmlFor="staff-uid-input" className="block text-xs text-[#E6DAC8] mb-1">
+                  Staff Firebase UID
                 </label>
                 <input
-                  id="new-staff-pw"
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="At least 4 characters"
-                  className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#120E0B] border border-[#2D241C] font-mono text-sm text-[#F6EFE4] focus:outline-none focus:border-[#C99A4E]"
-                  autoFocus
+                  id="staff-uid-input"
+                  type="text"
+                  value={newStaffUid}
+                  onChange={(e) => setNewStaffUid(e.target.value)}
+                  placeholder="Paste staff UID"
+                  className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-[#120E0B] border border-[#2D241C] font-mono text-xs text-[#F6EFE4] focus:outline-none focus:border-[#C99A4E]"
                 />
               </div>
 
               <div>
-                <label htmlFor="confirm-staff-pw" className="block text-xs text-[#E6DAC8] mb-1">
-                  Confirm Passcode
+                <label htmlFor="staff-email-input" className="block text-xs text-[#E6DAC8] mb-1">
+                  Google Email
                 </label>
                 <input
-                  id="confirm-staff-pw"
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Re-enter new passcode"
-                  className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-[#120E0B] border border-[#2D241C] font-mono text-sm text-[#F6EFE4] focus:outline-none focus:border-[#C99A4E]"
+                  id="staff-email-input"
+                  type="email"
+                  value={newStaffEmail}
+                  onChange={(e) => setNewStaffEmail(e.target.value)}
+                  placeholder="kitchen@example.com"
+                  className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-[#120E0B] border border-[#2D241C] text-xs text-[#F6EFE4] focus:outline-none focus:border-[#C99A4E]"
                 />
               </div>
-            </div>
 
-            {pwError && <p className="text-xs text-red-400">{pwError}</p>}
-            {pwSuccess && <p className="text-xs text-[#E3BC78]">{pwSuccess}</p>}
+              {staffError && <p className="text-xs text-red-400">{staffError}</p>}
+              {staffSuccess && <p className="text-xs text-[#E3BC78]">{staffSuccess}</p>}
 
-            <button
-              type="submit"
-              disabled={savingPw}
-              className="w-full min-h-[42px] px-4 py-2 rounded-xl bg-[#C99A4E] text-[#14100C] text-xs font-semibold hover:bg-[#D7AA60] disabled:opacity-50 transition-colors"
-            >
-              {savingPw ? 'Saving...' : 'Save New Passcode'}
-            </button>
-          </form>
+              <button
+                type="submit"
+                disabled={savingStaff}
+                className="w-full min-h-[40px] px-4 py-2 rounded-xl bg-[#C99A4E] text-[#14100C] text-xs font-semibold hover:bg-[#D7AA60] disabled:opacity-50 transition-colors inline-flex items-center justify-center gap-1.5"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>{savingStaff ? 'Granting Access...' : 'Grant Kitchen Access'}</span>
+              </button>
+            </form>
+
+            {staffAdmins.length > 0 && (
+              <div className="space-y-2 pt-2 border-t border-[#261E17] max-h-40 overflow-y-auto">
+                <p className="text-[11px] font-mono uppercase tracking-wider text-[#9E8B73]">
+                  Added Staff Accounts
+                </p>
+                {staffAdmins.map((staff) => (
+                  <div
+                    key={staff.uid}
+                    className="flex items-center justify-between gap-2 rounded-lg bg-[#14100C] border border-[#2A2119] px-3 py-2 text-xs"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-[#F6EFE4] truncate">{staff.email}</p>
+                      <p className="text-[10px] font-mono text-[#8C7A64] truncate">{staff.uid}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void onRemoveStaffAdmin(staff.uid)}
+                      aria-label={`Remove ${staff.email}`}
+                      className="p-1.5 rounded-lg text-[#9E8B73] hover:text-red-400 transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

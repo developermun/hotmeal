@@ -1,7 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  type Unsubscribe,
+} from 'firebase/firestore';
 import { ShoppingBag } from 'lucide-react';
 import { AdminLoginGate } from './components/AdminLoginGate.tsx';
-import { AdminPortal, type AdminSection } from './components/AdminPortal.tsx';
+import { AdminPortal, type AdminSection, type StaffAdminRecord } from './components/AdminPortal.tsx';
 import { DishModal } from './components/DishModal.tsx';
 import { Header, type CustomerView } from './components/Header.tsx';
 import { HeroBanner } from './components/HeroBanner.tsx';
@@ -9,6 +22,17 @@ import { MenuSection } from './components/MenuSection.tsx';
 import { OrderDrawer } from './components/OrderDrawer.tsx';
 import { TableTrackerView } from './components/TableTrackerView.tsx';
 import { formatKES } from './data/menu.ts';
+import {
+  auth,
+  buildFirestoreOrderPayload,
+  checkIsStaffAdmin,
+  db,
+  googleProvider,
+  handleFirestoreError,
+  mapDocToServiceRequest,
+  mapDocToTableOrder,
+  OperationType,
+} from './firebase.ts';
 import type {
   CartItem,
   DishOption,
@@ -68,41 +92,27 @@ function loadCartForTable(tableNumber: number): CartItem[] {
   }
 }
 
-const ADMIN_TOKEN_STORAGE_KEY = 'jikoni_admin_token';
-const FALLBACK_ORDERS_KEY = 'jikoni_static_orders_v2';
-const FALLBACK_REQUESTS_KEY = 'jikoni_static_requests_v2';
-const STATIC_FALLBACK_PIN = '2540';
+const TABLE_ORDER_IDS_PREFIX = 'jikoni_fs_order_ids_table_';
 
-function getStaticFallbackOrders(): TableOrder[] {
+function loadOrderIdsForTable(tableNumber: number): string[] {
   try {
-    const raw = localStorage.getItem(FALLBACK_ORDERS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
+    const raw = localStorage.getItem(`${TABLE_ORDER_IDS_PREFIX}${tableNumber}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is string => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(id))
+      : [];
   } catch {
-    // Ignore storage read errors
+    return [];
   }
-  return [];
 }
 
-function getStaticFallbackRequests(): ServiceRequest[] {
+function saveOrderIdsForTable(tableNumber: number, ids: string[]): void {
   try {
-    const raw = localStorage.getItem(FALLBACK_REQUESTS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
+    localStorage.setItem(`${TABLE_ORDER_IDS_PREFIX}${tableNumber}`, JSON.stringify(ids.slice(0, 30)));
   } catch {
-    // Ignore storage read errors
+    // Ignore storage write errors
   }
-  return [];
-}
-
-async function parseJsonIfAvailable<T>(res: Response): Promise<T | null> {
-  const ct = res.headers.get('content-type') || '';
-  if (!res.ok || !ct.includes('application/json')) return null;
-  return (await res.json()) as T;
 }
 
 export default function App() {
@@ -111,26 +121,33 @@ export default function App() {
   const [tableNumber, setTableNumber] = useState<number>(initialState.table);
   const [scannedViaQr, setScannedViaQr] = useState<boolean>(initialState.fromQr);
 
-  // Staff admin session token (kept only in sessionStorage)
-  const [adminToken, setAdminToken] = useState<string | null>(() => {
-    try {
-      return sessionStorage.getItem(ADMIN_TOKEN_STORAGE_KEY);
-    } catch {
-      return null;
-    }
-  });
+  // Firebase Auth state for Staff Admin Portal
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [isAdminAuthorized, setIsAdminAuthorized] = useState<boolean>(false);
 
-  // Customer cart & UI state
+  // Customer cart & tracked order IDs for current table
   const [cart, setCart] = useState<CartItem[]>(() => loadCartForTable(initialState.table));
+  const [tableOrderIds, setTableOrderIds] = useState<string[]>(() => loadOrderIdsForTable(initialState.table));
   const [selectedDish, setSelectedDish] = useState<MenuItem | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // Scoped order state (customer gets ONLY their table; admin gets all tables)
-  const [tableOrders, setTableOrders] = useState<TableOrder[]>([]);
+  // Live Firestore synced state
+  const [tableOrdersById, setTableOrdersById] = useState<Record<string, TableOrder>>({});
   const [adminOrders, setAdminOrders] = useState<TableOrder[]>([]);
   const [serviceRequests, setServiceRequests] = useState<ServiceRequest[]>([]);
+  const [staffAdmins, setStaffAdmins] = useState<StaffAdminRecord[]>([]);
   const [loadingOrders, setLoadingOrders] = useState<boolean>(true);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [syncNonce, setSyncNonce] = useState(0);
+
+  const tableOrders = useMemo(
+    () =>
+      Object.values(tableOrdersById)
+        .filter((o) => o.tableNumber === tableNumber)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [tableOrdersById, tableNumber]
+  );
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -139,161 +156,149 @@ export default function App() {
     }, 3200);
   }, []);
 
-  // Fetch customer table-scoped orders
-  const fetchCustomerTableOrders = useCallback(
-    async (silent = false) => {
-      if (!silent) setLoadingOrders(true);
-      try {
-        const res = await fetch(`/api/orders?table=${tableNumber}`, { cache: 'no-store' });
-        const json = await parseJsonIfAvailable<{ orders: TableOrder[] }>(res);
-        if (json) {
-          setTableOrders(json.orders || []);
-        } else {
-          setTableOrders(getStaticFallbackOrders().filter((o) => o.tableNumber === tableNumber));
-        }
-      } catch {
-        setTableOrders(getStaticFallbackOrders().filter((o) => o.tableNumber === tableNumber));
-      } finally {
-        if (!silent) setLoadingOrders(false);
-      }
-    },
-    [tableNumber]
-  );
-
-  // Fetch staff admin orders & service requests (authenticated)
-  const fetchAdminState = useCallback(
-    async (silent = false) => {
-      if (!adminToken) return;
-      if (!silent) setLoadingOrders(true);
-      try {
-        const headers = { 'x-admin-token': adminToken };
-        const [ordersRes, reqRes] = await Promise.all([
-          fetch('/api/orders', { headers, cache: 'no-store' }),
-          fetch('/api/service-requests', { headers, cache: 'no-store' }),
-        ]);
-
-        if (ordersRes.status === 401 || reqRes.status === 401) {
-          setAdminToken(null);
-          try {
-            sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
-          } catch {
-            // Ignore storage removal errors
-          }
-          return;
-        }
-
-        const ordersJson = await parseJsonIfAvailable<{ orders: TableOrder[] }>(ordersRes);
-        const reqJson = await parseJsonIfAvailable<{ requests: ServiceRequest[] }>(reqRes);
-
-        if (ordersJson && reqJson) {
-          setAdminOrders(ordersJson.orders || []);
-          setServiceRequests(reqJson.requests || []);
-        } else {
-          setAdminOrders(getStaticFallbackOrders());
-          setServiceRequests(getStaticFallbackRequests());
-        }
-      } catch {
-        setAdminOrders(getStaticFallbackOrders());
-        setServiceRequests(getStaticFallbackRequests());
-      } finally {
-        if (!silent) setLoadingOrders(false);
-      }
-    },
-    [adminToken]
-  );
-
+  // Watch Firebase Auth state (only triggers admin verification when on admin route or signed in)
   useEffect(() => {
-    if (route.zone === 'customer') {
-      fetchCustomerTableOrders(false);
-      const interval = window.setInterval(() => fetchCustomerTableOrders(true), 2500);
-
-      let eventSource: EventSource | null = null;
-      if (typeof EventSource !== 'undefined') {
-        eventSource = new EventSource(`/api/events?table=${tableNumber}`);
-        eventSource.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data) as { type?: string };
-            if (data.type === 'sync') {
-              fetchCustomerTableOrders(true);
-            }
-          } catch {
-            // Ignore malformed SSE payload
-          }
-        };
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setAuthUser(user);
+      if (!user) {
+        setIsAdminAuthorized(false);
+        setAuthLoading(false);
+        return;
       }
+      setAuthLoading(true);
+      try {
+        const allowed = await checkIsStaffAdmin(user);
+        setIsAdminAuthorized(allowed);
+      } catch {
+        setIsAdminAuthorized(false);
+      } finally {
+        setAuthLoading(false);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
-      const handleSyncEvent = () => fetchCustomerTableOrders(true);
-      const handleVisibility = () => {
-        if (document.visibilityState === 'visible') {
-          fetchCustomerTableOrders(true);
-        }
-      };
-      const handleStorage = (e: StorageEvent) => {
-        if (e.key === FALLBACK_ORDERS_KEY) {
-          fetchCustomerTableOrders(true);
-        }
-      };
+  // Customer real-time Firestore listeners for each order ID placed on this table
+  useEffect(() => {
+    if (route.zone !== 'customer') return undefined;
 
-      window.addEventListener('focus', handleSyncEvent);
-      window.addEventListener('storage', handleStorage);
-      document.addEventListener('visibilitychange', handleVisibility);
-
-      return () => {
-        window.clearInterval(interval);
-        eventSource?.close();
-        window.removeEventListener('focus', handleSyncEvent);
-        window.removeEventListener('storage', handleStorage);
-        document.removeEventListener('visibilitychange', handleVisibility);
-      };
+    setTableOrdersById({});
+    if (tableOrderIds.length === 0) {
+      setLoadingOrders(false);
+      return undefined;
     }
 
-    if (adminToken) {
-      fetchAdminState(false);
-      const interval = window.setInterval(() => fetchAdminState(true), 2500);
-
-      let eventSource: EventSource | null = null;
-      if (typeof EventSource !== 'undefined' && !adminToken.startsWith('static-staff-')) {
-        eventSource = new EventSource(`/api/events?token=${encodeURIComponent(adminToken)}`);
-        eventSource.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data) as { type?: string };
-            if (data.type === 'sync') {
-              fetchAdminState(true);
-            }
-          } catch {
-            // Ignore malformed SSE payload
+    setLoadingOrders(true);
+    let pendingInitial = tableOrderIds.length;
+    const unsubscribes: Unsubscribe[] = tableOrderIds.map((orderId) => {
+      const path = `orders/${orderId}`;
+      return onSnapshot(
+        doc(db, 'orders', orderId),
+        (snapshot) => {
+          if (snapshot.exists()) {
+            const mapped = mapDocToTableOrder(snapshot.id, snapshot.data({ serverTimestamps: 'estimate' }));
+            setTableOrdersById((prev) => ({ ...prev, [snapshot.id]: mapped }));
           }
-        };
+          pendingInitial = Math.max(0, pendingInitial - 1);
+          if (pendingInitial === 0) setLoadingOrders(false);
+        },
+        (error) => {
+          setLoadingOrders(false);
+          handleFirestoreError(error, OperationType.GET, path);
+        }
+      );
+    });
+
+    return () => {
+      for (const unsub of unsubscribes) {
+        unsub();
       }
+    };
+  }, [route.zone, tableNumber, tableOrderIds]);
 
-      const handleSyncEvent = () => fetchAdminState(true);
-      const handleVisibility = () => {
-        if (document.visibilityState === 'visible') {
-          fetchAdminState(true);
-        }
-      };
-      const handleStorage = (e: StorageEvent) => {
-        if (e.key === FALLBACK_ORDERS_KEY || e.key === FALLBACK_REQUESTS_KEY) {
-          fetchAdminState(true);
-        }
-      };
+  // Cross-tab sync of tableOrderIds in the same browser
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === `${TABLE_ORDER_IDS_PREFIX}${tableNumber}`) {
+        setTableOrderIds(loadOrderIdsForTable(tableNumber));
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [tableNumber]);
 
-      window.addEventListener('focus', handleSyncEvent);
-      window.addEventListener('storage', handleStorage);
-      document.addEventListener('visibilitychange', handleVisibility);
-
-      return () => {
-        window.clearInterval(interval);
-        eventSource?.close();
-        window.removeEventListener('focus', handleSyncEvent);
-        window.removeEventListener('storage', handleStorage);
-        document.removeEventListener('visibilitychange', handleVisibility);
-      };
+  // Admin real-time Firestore collection listeners (only attached once auth is verified)
+  useEffect(() => {
+    if (route.zone !== 'admin') return undefined;
+    if (authLoading || !authUser || !isAdminAuthorized) {
+      setAdminOrders([]);
+      setServiceRequests([]);
+      setStaffAdmins([]);
+      setLoadingOrders(false);
+      return undefined;
     }
 
-    setLoadingOrders(false);
-    return undefined;
-  }, [route.zone, tableNumber, adminToken, fetchCustomerTableOrders, fetchAdminState]);
+    setLoadingOrders(true);
+    const ordersPath = 'orders';
+    const requestsPath = 'serviceRequests';
+    const adminsPath = 'admins';
+
+    const unsubOrders = onSnapshot(
+      query(collection(db, ordersPath), orderBy('createdAt', 'desc')),
+      (snap) => {
+        const list = snap.docs.map((d) =>
+          mapDocToTableOrder(d.id, d.data({ serverTimestamps: 'estimate' }))
+        );
+        setAdminOrders(list);
+        setLoadingOrders(false);
+      },
+      (error) => {
+        setLoadingOrders(false);
+        handleFirestoreError(error, OperationType.LIST, ordersPath);
+      }
+    );
+
+    const unsubRequests = onSnapshot(
+      query(collection(db, requestsPath), orderBy('createdAt', 'desc')),
+      (snap) => {
+        const list = snap.docs.map((d) =>
+          mapDocToServiceRequest(d.id, d.data({ serverTimestamps: 'estimate' }))
+        );
+        setServiceRequests(list);
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, requestsPath);
+      }
+    );
+
+    const unsubAdmins = onSnapshot(
+      query(collection(db, adminsPath), orderBy('createdAt', 'desc')),
+      (snap) => {
+        const list: StaffAdminRecord[] = snap.docs.map((d) => {
+          const data = d.data({ serverTimestamps: 'estimate' });
+          return {
+            uid: d.id,
+            email: String(data.email || ''),
+            role: 'admin',
+            createdAt:
+              data.createdAt && typeof data.createdAt.toDate === 'function'
+                ? data.createdAt.toDate().toISOString()
+                : new Date().toISOString(),
+          };
+        });
+        setStaffAdmins(list);
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, adminsPath);
+      }
+    );
+
+    return () => {
+      unsubOrders();
+      unsubRequests();
+      unsubAdmins();
+    };
+  }, [route.zone, authLoading, authUser, isAdminAuthorized, syncNonce]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -302,6 +307,7 @@ export default function App() {
       setTableNumber(next.table);
       setScannedViaQr(next.fromQr);
       setCart(loadCartForTable(next.table));
+      setTableOrderIds(loadOrderIdsForTable(next.table));
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -342,6 +348,7 @@ export default function App() {
     setTableNumber(nextTable);
     setScannedViaQr(fromQrScan);
     setCart(loadCartForTable(nextTable));
+    setTableOrderIds(loadOrderIdsForTable(nextTable));
     const url = new URL(window.location.href);
     url.pathname = '/';
     url.searchParams.delete('view');
@@ -354,114 +361,37 @@ export default function App() {
     );
   };
 
-  const handleVerifyAdminPin = async (pin: string) => {
-    try {
-      const res = await fetch('/api/admin/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin }),
-      });
-
-      const ct = res.headers.get('content-type') || '';
-      if (res.status === 401) {
-        const data = ct.includes('application/json')
-          ? ((await res.json()) as { error?: string })
-          : {};
-        throw new Error(data.error || 'Incorrect staff passcode.');
-      }
-
-      if (res.ok && ct.includes('application/json')) {
-        const data = (await res.json()) as { ok?: boolean; token?: string };
-        if (data.token) {
-          setAdminToken(data.token);
-          try {
-            sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, data.token);
-          } catch {
-            // Ignore storage errors
-          }
-          return;
-        }
-      }
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('passcode')) {
-        throw err;
-      }
-    }
-
-    // Static hosting fallback when Express /api/admin/verify is unavailable (404/405)
-    let expectedStaticPin = STATIC_FALLBACK_PIN;
-    try {
-      const savedPin = localStorage.getItem('jikoni_static_admin_pin');
-      if (savedPin) expectedStaticPin = savedPin;
-    } catch {
-      // Ignore storage read errors
-    }
-
-    if (pin !== expectedStaticPin) {
-      throw new Error('Incorrect staff passcode.');
-    }
-    const localToken = `static-staff-${Date.now()}`;
-    setAdminToken(localToken);
-    try {
-      sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, localToken);
-    } catch {
-      // Ignore storage errors
-    }
+  const handleSignInWithGoogle = async () => {
+    await signInWithPopup(auth, googleProvider);
   };
 
-  const handleChangeAdminPassword = async (newPassword: string) => {
-    if (!adminToken) return;
-
-    if (!adminToken.startsWith('static-staff-')) {
-      try {
-        const res = await fetch('/api/admin/password', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-token': adminToken,
-          },
-          body: JSON.stringify({ newPassword }),
-          cache: 'no-store',
-        });
-        const ct = res.headers.get('content-type') || '';
-        if (res.ok && ct.includes('application/json')) {
-          const data = (await res.json()) as { ok?: boolean; token?: string };
-          if (data.token) {
-            setAdminToken(data.token);
-            try {
-              sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, data.token);
-            } catch {
-              // Ignore storage errors
-            }
-          }
-          return;
-        }
-        if (res.status >= 400 && res.status < 500 && res.status !== 404 && res.status !== 405) {
-          const data = ct.includes('application/json') ? ((await res.json()) as { error?: string }) : {};
-          throw new Error(data.error || 'Unable to update passcode.');
-        }
-      } catch (err) {
-        if (err instanceof Error && err.message !== 'Failed to fetch') {
-          throw err;
-        }
-      }
-    }
-
-    try {
-      localStorage.setItem('jikoni_static_admin_pin', newPassword);
-    } catch {
-      // Ignore storage errors
-    }
-  };
-
-  const handleLockAdminPortal = () => {
-    setAdminToken(null);
+  const handleSignOutAdmin = async () => {
+    await signOut(auth);
     setAdminOrders([]);
     setServiceRequests([]);
+    setStaffAdmins([]);
+    setIsAdminAuthorized(false);
+  };
+
+  const handleAddStaffAdmin = async (uid: string, email: string) => {
+    const path = `admins/${uid}`;
     try {
-      sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
-    } catch {
-      // Ignore storage errors
+      await setDoc(doc(db, 'admins', uid), {
+        email: email.trim().slice(0, 120),
+        role: 'admin',
+        createdAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  };
+
+  const handleRemoveStaffAdmin = async (uid: string) => {
+    const path = `admins/${uid}`;
+    try {
+      await deleteDoc(doc(db, 'admins', uid));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
     }
   };
 
@@ -585,181 +515,83 @@ export default function App() {
       notes: c.notes,
     }));
 
-    let createdOrder: TableOrder | null = null;
+    const orderRef = doc(collection(db, 'orders'));
+    const randomSuffix = String(Math.floor(1000 + Math.random() * 9000));
+    const orderNumber = `JK-${tableNumber}${randomSuffix}`;
+    const { payload } = buildFirestoreOrderPayload({
+      orderNumber,
+      tableNumber,
+      guestName,
+      items: orderItems,
+      serviceNote,
+      estimatedMinutes: estPrep,
+    });
 
+    const path = `orders/${orderRef.id}`;
     try {
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tableNumber,
-          guestName: guestName || undefined,
-          serviceNote: serviceNote || undefined,
-          estimatedMinutes: estPrep,
-          items: orderItems,
-        }),
-        cache: 'no-store',
-      });
-      const data = await parseJsonIfAvailable<{ order: TableOrder; error?: string }>(res);
-      if (data?.order) {
-        createdOrder = data.order;
-      } else if (res.status >= 400 && res.status < 500 && res.status !== 404 && res.status !== 405) {
-        const ct = res.headers.get('content-type') || '';
-        const errData = ct.includes('application/json')
-          ? ((await res.json().catch(() => ({}))) as { error?: string })
-          : {};
-        throw new Error(errData.error || 'Could not submit order to kitchen.');
-      }
-    } catch (err) {
-      if (err instanceof Error && err.message !== 'Failed to fetch') {
-        throw err;
-      }
+      await setDoc(orderRef, payload);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
     }
 
-    if (!createdOrder) {
-      const existingAll = getStaticFallbackOrders();
-      const subtotal = orderItems.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0);
-      const seq = 101 + existingAll.length;
-      const nowIso = new Date().toISOString();
-      createdOrder = {
-        id: `ord-${seq}-${Date.now().toString(36)}`,
-        orderNumber: `JK-${seq}`,
-        tableNumber,
-        guestName: guestName || undefined,
-        items: orderItems,
-        subtotal,
-        serviceNote: serviceNote || undefined,
-        status: 'Received',
-        createdAt: nowIso,
-        updatedAt: nowIso,
-        estimatedMinutes: estPrep,
-      };
-      try {
-        localStorage.setItem(FALLBACK_ORDERS_KEY, JSON.stringify([createdOrder, ...existingAll]));
-      } catch {
-        // Ignore storage write error
-      }
-    }
-
-    const finalOrder = createdOrder;
-    setTableOrders((prev) => [finalOrder, ...prev.filter((o) => o.id !== finalOrder.id)]);
+    const nextIds = [orderRef.id, ...tableOrderIds.filter((id) => id !== orderRef.id)];
+    saveOrderIdsForTable(tableNumber, nextIds);
+    setTableOrderIds(nextIds);
     setCart([]);
     setDrawerOpen(false);
     navigateCustomerView('tracker', tableNumber);
-    showToast(`Order ${finalOrder.orderNumber} sent to kitchen for Table ${tableNumber}`);
+    showToast(`Order ${orderNumber} sent to kitchen for Table ${tableNumber}`);
   };
 
   const handleRequestService = async (type: ServiceRequestType) => {
-    let created: ServiceRequest | null = null;
-
+    const reqRef = doc(collection(db, 'serviceRequests'));
+    const path = `serviceRequests/${reqRef.id}`;
     try {
-      const res = await fetch('/api/service-requests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tableNumber, type }),
-        cache: 'no-store',
-      });
-      const data = await parseJsonIfAvailable<{ request: ServiceRequest }>(res);
-      if (data?.request) created = data.request;
-    } catch {
-      // Fall through to local fallback
-    }
-
-    if (!created) {
-      const existingReqs = getStaticFallbackRequests();
-      created = {
-        id: `srv-${Date.now().toString(36)}`,
-        tableNumber,
+      await setDoc(reqRef, {
+        tableNumber: Math.max(1, Math.min(99, Math.round(tableNumber))),
         type,
         status: 'Open',
-        createdAt: new Date().toISOString(),
-      };
-      try {
-        localStorage.setItem(FALLBACK_REQUESTS_KEY, JSON.stringify([created, ...existingReqs]));
-      } catch {
-        // Ignore storage write error
-      }
+        createdAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
     }
   };
 
   const handleAdvanceOrderStatus = async (orderId: string, nextStatus: OrderStatus) => {
-    if (!adminToken) return;
-    let updatedOrder: TableOrder | null = null;
-
-    if (!adminToken.startsWith('static-staff-')) {
-      try {
-        const res = await fetch(`/api/orders/${orderId}/status`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-token': adminToken,
-          },
-          body: JSON.stringify({ status: nextStatus }),
-          cache: 'no-store',
-        });
-        const data = await parseJsonIfAvailable<{ order: TableOrder }>(res);
-        if (data?.order) updatedOrder = data.order;
-      } catch {
-        // Fall through to local fallback
-      }
+    const path = `orders/${orderId}`;
+    try {
+      await updateDoc(doc(db, 'orders', orderId), {
+        status: nextStatus,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
     }
-
-    setAdminOrders((prev) => {
-      const next = prev.map((o) =>
-        o.id === orderId
-          ? updatedOrder || { ...o, status: nextStatus, updatedAt: new Date().toISOString() }
-          : o
-      );
-      if (!updatedOrder) {
-        try {
-          localStorage.setItem(FALLBACK_ORDERS_KEY, JSON.stringify(next));
-        } catch {
-          // Ignore storage write error
-        }
-      }
-      return next;
-    });
   };
 
   const handleResolveServiceRequest = async (requestId: string) => {
-    if (!adminToken) return;
-    let updatedReq: ServiceRequest | null = null;
-
-    if (!adminToken.startsWith('static-staff-')) {
-      try {
-        const res = await fetch(`/api/service-requests/${requestId}`, {
-          method: 'PATCH',
-          headers: { 'x-admin-token': adminToken },
-          cache: 'no-store',
-        });
-        const data = await parseJsonIfAvailable<{ request: ServiceRequest }>(res);
-        if (data?.request) updatedReq = data.request;
-      } catch {
-        // Fall through to local fallback
-      }
+    const path = `serviceRequests/${requestId}`;
+    try {
+      await updateDoc(doc(db, 'serviceRequests', requestId), {
+        status: 'Resolved',
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
     }
-
-    setServiceRequests((prev) => {
-      const next = prev.map((r) =>
-        r.id === requestId ? updatedReq || { ...r, status: 'Resolved' as const } : r
-      );
-      if (!updatedReq) {
-        try {
-          localStorage.setItem(FALLBACK_REQUESTS_KEY, JSON.stringify(next));
-        } catch {
-          // Ignore storage write error
-        }
-      }
-      return next;
-    });
   };
 
   // ==================== ISOLATED ADMIN PORTAL ROUTE ====================
   if (route.zone === 'admin') {
-    if (!adminToken) {
+    if (authLoading || !authUser || !isAdminAuthorized) {
       return (
         <AdminLoginGate
-          onVerifyPin={handleVerifyAdminPin}
+          authLoading={authLoading}
+          signedInEmail={authUser?.email || null}
+          signedInUid={authUser?.uid || null}
+          unauthorizedAccount={Boolean(!authLoading && authUser && !isAdminAuthorized)}
+          onSignInWithGoogle={handleSignInWithGoogle}
+          onSignOut={handleSignOutAdmin}
           onReturnToMenu={() => navigateCustomerView('menu')}
         />
       );
@@ -771,16 +603,19 @@ export default function App() {
         onSelectSection={navigateAdminSection}
         orders={adminOrders}
         serviceRequests={serviceRequests}
+        staffAdmins={staffAdmins}
+        adminEmail={authUser.email}
         loadingOrders={loadingOrders}
         onAdvanceOrderStatus={handleAdvanceOrderStatus}
         onResolveServiceRequest={handleResolveServiceRequest}
-        onRefresh={() => fetchAdminState(false)}
+        onRefresh={() => setSyncNonce((n) => n + 1)}
         onSimulateScan={(num) => {
           handleChangeTable(num, true);
           setRoute({ zone: 'customer', view: 'menu' });
         }}
-        onChangePassword={handleChangeAdminPassword}
-        onLockPortal={handleLockAdminPortal}
+        onAddStaffAdmin={handleAddStaffAdmin}
+        onRemoveStaffAdmin={handleRemoveStaffAdmin}
+        onLockPortal={handleSignOutAdmin}
         currentTable={tableNumber}
       />
     );

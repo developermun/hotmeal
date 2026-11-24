@@ -1,0 +1,184 @@
+{
+  "entities": {
+    "OrderItem": {
+      "title": "OrderItem",
+      "description": "A single customized dish line item within a customer table order.",
+      "type": "object",
+      "properties": {
+        "menuItemId": {
+          "type": "string",
+          "description": "Slug identifier of the menu dish.",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the ordered dish.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "quantity": {
+          "type": "integer",
+          "description": "Number of portions ordered (1 to 50)."
+        },
+        "unitPrice": {
+          "type": "number",
+          "description": "Unit price in KES."
+        },
+        "selectedOptionLabel": {
+          "type": "string",
+          "description": "Optional chosen dish preparation or portion label.",
+          "maxLength": 120
+        },
+        "spiceLevel": {
+          "type": "string",
+          "description": "Optional spice preference.",
+          "enum": ["Mild", "Medium", "Pilipili Hot"]
+        },
+        "notes": {
+          "type": "string",
+          "description": "Optional kitchen preparation note for this dish.",
+          "maxLength": 200
+        }
+      },
+      "required": ["menuItemId", "name", "quantity", "unitPrice"]
+    },
+    "TableOrder": {
+      "title": "TableOrder",
+      "description": "A dine-in order placed from a table QR menu and tracked by kitchen staff.",
+      "type": "object",
+      "properties": {
+        "orderNumber": {
+          "type": "string",
+          "description": "Human-readable order ticket number.",
+          "minLength": 4,
+          "maxLength": 20,
+          "pattern": "^JK-[0-9]{3,10}$"
+        },
+        "tableNumber": {
+          "type": "integer",
+          "description": "Dining table number from 1 to 99."
+        },
+        "guestName": {
+          "type": "string",
+          "description": "Optional guest label or first name.",
+          "maxLength": 60
+        },
+        "items": {
+          "type": "array",
+          "description": "List of ordered dishes (1 to 30 items)."
+        },
+        "subtotal": {
+          "type": "number",
+          "description": "Total order amount in KES."
+        },
+        "serviceNote": {
+          "type": "string",
+          "description": "Optional table-wide service note for kitchen or waiter.",
+          "maxLength": 240
+        },
+        "status": {
+          "type": "string",
+          "description": "Kitchen fulfillment status.",
+          "enum": ["Received", "Preparing", "Ready", "Served"]
+        },
+        "estimatedMinutes": {
+          "type": "integer",
+          "description": "Estimated preparation time in minutes."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the order was placed."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the order status was last updated."
+        }
+      },
+      "required": [
+        "orderNumber",
+        "tableNumber",
+        "items",
+        "subtotal",
+        "status",
+        "estimatedMinutes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ServiceRequest": {
+      "title": "ServiceRequest",
+      "description": "A dine-in assistance alert sent from a customer table to floor staff.",
+      "type": "object",
+      "properties": {
+        "tableNumber": {
+          "type": "integer",
+          "description": "Dining table number from 1 to 99."
+        },
+        "type": {
+          "type": "string",
+          "description": "Requested floor assistance type.",
+          "enum": ["Waiter Call", "Request Bill", "Extra Napkins & Water"]
+        },
+        "status": {
+          "type": "string",
+          "description": "Whether staff have acknowledged the alert.",
+          "enum": ["Open", "Resolved"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the request was sent."
+        }
+      },
+      "required": ["tableNumber", "type", "status", "createdAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized restaurant staff account granted Admin & Kitchen access.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified Google account email for the staff member.",
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "description": "Staff role.",
+          "enum": ["admin"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin access was granted."
+        }
+      },
+      "required": ["email", "role", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/orders/{orderId}": {
+      "schema": {
+        "$ref": "#/entities/TableOrder"
+      },
+      "description": "Live dine-in kitchen orders placed from table QR menus."
+    },
+    "/serviceRequests/{requestId}": {
+      "schema": {
+        "$ref": "#/entities/ServiceRequest"
+      },
+      "description": "Waiter call, bill request, and table assistance alerts."
+    },
+    "/admins/{uid}": {
+      "schema": {
+        "$ref": "#/entities/AdminUser"
+      },
+      "description": "Authorized staff UIDs permitted to manage the Admin & Kitchen dashboard."
+    }
+  }
+}
